@@ -1,0 +1,14 @@
+dsh-resume
+Copyright 2026 aa2246740
+
+This product includes a byte-for-byte copy of the resume-session reader
+distributed with xAI Grok 1.0.5 at
+`bundled/skills/shared/resume-session/session_reader.py`:
+
+SHA-256: 342853ca19f8d9f10dd171890ee1bbacec2350ea90221cb4ad6925cda2380a58
+
+Grok and xAI are trademarks of xAI.
+
+This product integrates with DeepSeek Harness but is unofficial and is not
+affiliated with or endorsed by DeepSeek, OpenAI, Anthropic, Cursor, xAI, or
+Grok.

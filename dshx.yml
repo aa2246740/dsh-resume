@@ -1,0 +1,5 @@
+id: dsh-resume
+entry: src/dsh-resume.ts
+marker: "[dsh-resume] loaded"
+kind: tool
+profile: web

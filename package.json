@@ -1,0 +1,67 @@
+{
+  "name": "dsh-resume",
+  "version": "0.1.0",
+  "description": "Continue Codex, Claude Code, and Cursor work in DeepSeek Harness.",
+  "type": "module",
+  "main": "lib/dsh-resume.js",
+  "types": "lib/types/dsh-resume.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/dsh-resume.d.ts",
+      "default": "./lib/dsh-resume.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/*.js",
+    "lib/*.js.map",
+    "lib/types/**/*.d.ts",
+    "resources/session_reader.py",
+    "cordis.yml",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsdown",
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx/esm --test tests/*.spec.ts"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@11.7.0",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aa2246740/dsh-resume.git"
+  },
+  "homepage": "https://github.com/aa2246740/dsh-resume#readme",
+  "bugs": {
+    "url": "https://github.com/aa2246740/dsh-resume/issues"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "codex",
+    "claude-code",
+    "cursor",
+    "session-handoff"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-skill": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.8"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-skill": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.8",
+    "@types/node": "^22.20.0",
+    "tsdown": "^0.22.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}
