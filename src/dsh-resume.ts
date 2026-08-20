@@ -5,6 +5,7 @@ import type {} from '@deepseek-ai/dsh-skill'
 import {
   FOREIGN_SESSION_ACTIONS,
   FOREIGN_SESSION_PROVIDERS,
+  GROK_SESSION_READER_PATH,
   runSessionReader,
   SESSION_READER_PATH,
 } from './reader.ts'
@@ -18,16 +19,19 @@ const JSON_TEXT_OUTPUT = {
   render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }],
 }
 
-/** Register one read-only reader tool and three user-only slash skills. */
+/** Register one read-only reader tool and five user-only slash skills. */
 export function apply(ctx: Context): void {
   if (!existsSync(SESSION_READER_PATH)) {
     throw new Error(`dsh-resume: missing bundled reader at ${SESSION_READER_PATH}`)
+  }
+  if (!existsSync(GROK_SESSION_READER_PATH)) {
+    throw new Error(`dsh-resume: missing pinned Grok reader at ${GROK_SESSION_READER_PATH}`)
   }
 
   console.log('[dsh-resume] loaded')
   ctx.tools.register(defineTool({
     name: 'foreign_session_read',
-    description: 'Read Codex, Claude Code, or Cursor local session history into the Grok-compatible inert JSON schema. Use only after an explicit resume slash skill or explicit user request. Discovery is scoped to the current DSH working directory; an explicit native ID or path is supported. The tool is read-only and never executes recovered calls.',
+    description: 'Read Codex, Claude Code, Cursor, Grok, or Pi local session history into a Grok-compatible inert JSON schema. Use only after an explicit resume slash skill or explicit user request. Discovery is scoped to the current DSH working directory; an explicit native ID or path is supported. The tool is read-only and never executes recovered calls.',
     parameters: {
       provider: {
         type: 'string',
@@ -87,5 +91,5 @@ export function apply(ctx: Context): void {
   }
 }
 
-export { buildReaderArgs, runSessionReader, SESSION_READER_PATH } from './reader.ts'
+export { buildReaderArgs, GROK_SESSION_READER_PATH, runSessionReader, SESSION_READER_PATH } from './reader.ts'
 export { RESUME_SKILL_SPECS, resumeSkillContent, skillRegistration } from './skills.ts'

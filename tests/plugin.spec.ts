@@ -6,7 +6,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import * as plugin from '../src/dsh-resume.ts'
 
-test('plugin registers one reader tool and three user-only slash skills', async (t) => {
+test('plugin registers one reader tool and five user-only slash skills', async (t) => {
   const ctx = new Context()
   t.after(async () => { await ctx.fiber.dispose() })
   await ctx.plugin(SystemPrompt)
@@ -20,6 +20,8 @@ test('plugin registers one reader tool and three user-only slash skills', async 
     'resume-claude',
     'resume-codex',
     'resume-cursor',
+    'resume-grok',
+    'resume-pi',
   ])
   for (const skill of skills) {
     assert.deepEqual(skill.invocation, { modelInvocable: false, userInvocable: true })

@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const FOREIGN_SESSION_PROVIDERS = ['claude', 'codex', 'cursor'] as const
+export const FOREIGN_SESSION_PROVIDERS = ['claude', 'codex', 'cursor', 'grok', 'pi'] as const
 export type ForeignSessionProvider = typeof FOREIGN_SESSION_PROVIDERS[number]
 
 export const FOREIGN_SESSION_ACTIONS = ['show', 'list'] as const
@@ -14,7 +14,8 @@ const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 const MAX_STDERR_BYTES = 256 * 1024
 
 const PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
-export const SESSION_READER_PATH = join(PLUGIN_ROOT, 'resources', 'session_reader.py')
+export const SESSION_READER_PATH = join(PLUGIN_ROOT, 'resources', 'dsh_session_reader.py')
+export const GROK_SESSION_READER_PATH = join(PLUGIN_ROOT, 'resources', 'session_reader.py')
 
 interface PythonCommand {
   readonly command: string
@@ -74,7 +75,7 @@ export function buildReaderArgs(request: ReaderRequest): string[] {
 }
 
 /**
- * Run the vendored Grok reader as a bounded, read-only child process.
+ * Run the read-only Grok-compatible reader wrapper as a bounded child process.
  * Exit 2 is returned as ordinary text because it carries disambiguation
  * candidates the agent must show to the user.
  */

@@ -1,7 +1,7 @@
 {
   "name": "dsh-resume",
-  "version": "0.1.0",
-  "description": "Continue Codex, Claude Code, and Cursor work in DeepSeek Harness.",
+  "version": "0.2.0",
+  "description": "Continue Codex, Claude Code, Cursor, Grok, and Pi work in DeepSeek Harness.",
   "type": "module",
   "main": "lib/dsh-resume.js",
   "types": "lib/types/dsh-resume.d.ts",
@@ -16,6 +16,7 @@
     "lib/*.js",
     "lib/*.js.map",
     "lib/types/**/*.d.ts",
+    "resources/dsh_session_reader.py",
     "resources/session_reader.py",
     "cordis.yml",
     "README.md",
@@ -47,6 +48,8 @@
     "codex",
     "claude-code",
     "cursor",
+    "grok",
+    "pi-coding-agent",
     "session-handoff"
   ],
   "peerDependencies": {

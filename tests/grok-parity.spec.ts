@@ -2,13 +2,13 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { SESSION_READER_PATH } from '../src/reader.ts'
+import { GROK_SESSION_READER_PATH } from '../src/reader.ts'
 import { RESUME_SKILL_SPECS, resumeSkillContent } from '../src/skills.ts'
 
 const GROK_READER_SHA256 = '342853ca19f8d9f10dd171890ee1bbacec2350ea90221cb4ad6925cda2380a58'
 
 test('vendored reader is byte-for-byte the Grok 1.0.5 bundled reader', async () => {
-  const content = await readFile(SESSION_READER_PATH)
+  const content = await readFile(GROK_SESSION_READER_PATH)
   assert.equal(createHash('sha256').update(content).digest('hex'), GROK_READER_SHA256)
 })
 
