@@ -10,25 +10,23 @@ Unofficial. Not affiliated with DeepSeek, OpenAI, Anthropic, Cursor, xAI, or Pi.
 
 ## What it looks like
 
-DeepSeek Harness Web did not boot in this environment. These shots are the repo's own reader against a public demo session — the same payload the plugin feeds DSH.
+These shots are official DeepSeek Harness Web. The demo content is a public checkout-widget session (tax rounding), not anyone's private log.
 
-![Six-part handoff: goal, files, done, still open, next step. Hidden Grok reasoning is dropped.](docs/screenshots/handoff.gif)
+Type `/resume-claude` in the official composer. The slash skill shows up.
 
-If a title matches more than one session, it stops and lists the candidates.
+![Official DeepSeek Harness composer with /resume-claude typed. Chrome is visible.](docs/screenshots/composer-resume-claude.png)
 
-![`/resume-claude checkout` hits two sessions and asks for an id.](docs/screenshots/candidates.png)
+Send `/resume-claude latest`. The handoff lands in the current DSH session.
 
-Recovered history is marked inert. It is data, not something to run again.
+![Type and send /resume-claude latest in the official composer. The six-part handoff appears.](docs/screenshots/handoff.gif)
 
-![Bundled human renderer: INERT FOREIGN HISTORY, tool calls tagged inert.](docs/screenshots/inert-history.png)
+Same six parts as Grok: goal, files, done, still open, stopping point, reader warnings.
 
-Every recovered turn and tool call carries `inert: true`.
+![Six-part handoff in a DSH session: open 0.5-cent rounding case, next step, reader warnings.](docs/screenshots/handoff.png)
 
-![Reader JSON with inert: true on turns and tool_calls.](docs/screenshots/json-inert.png)
+If a title matches more than one session, it stops. The official UI lists the candidates.
 
-Automatic discovery stays in the current working directory.
-
-![`claude list` shows only the two Claude sessions for this directory.](docs/screenshots/session-list.png)
+![`/resume-claude checkout` hits two sessions. The official picker shows tax rounding and shipping estimate.](docs/screenshots/candidates.png)
 
 ## Install
 

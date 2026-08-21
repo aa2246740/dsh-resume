@@ -2,6 +2,13 @@ export declare const FOREIGN_SESSION_PROVIDERS: readonly ["claude", "codex", "cu
 export type ForeignSessionProvider = typeof FOREIGN_SESSION_PROVIDERS[number];
 export declare const FOREIGN_SESSION_ACTIONS: readonly ["show", "list"];
 export type ForeignSessionAction = typeof FOREIGN_SESSION_ACTIONS[number];
+/**
+ * Pull `/resume-<provider> <ref>` from the triggering user message.
+ * `latest` and a bare slash stay undefined so show still means newest.
+ */
+export declare function slashReferenceFromUserText(text: string, provider: ForeignSessionProvider): string | undefined;
+/** Walk recent user messages for a slash reference the model omitted. */
+export declare function slashReferenceFromSession(events: readonly unknown[] | undefined, provider: ForeignSessionProvider): string | undefined;
 export declare const SESSION_READER_PATH: string;
 export declare const GROK_SESSION_READER_PATH: string;
 export interface ReaderRequest {

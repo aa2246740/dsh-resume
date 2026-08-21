@@ -8,6 +8,7 @@ import {
   GROK_SESSION_READER_PATH,
   runSessionReader,
   SESSION_READER_PATH,
+  slashReferenceFromSession,
 } from './reader.ts'
 import { RESUME_SKILL_SPECS, skillRegistration } from './skills.ts'
 
@@ -63,11 +64,16 @@ export function apply(ctx: Context): void {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const cwd = exec.agent?.session.header.cwd ?? process.cwd()
+      const action = args.action ?? 'show'
+      const inferred = args.reference?.trim()
+        || (action === 'show'
+          ? slashReferenceFromSession(exec.agent?.session.events, args.provider)
+          : undefined)
       return await runSessionReader({
         provider: args.provider,
-        action: args.action ?? 'show',
+        action,
         cwd,
-        ...args.reference === undefined ? {} : { reference: args.reference },
+        ...inferred ? { reference: inferred } : {},
         ...args.withinMinutes === undefined ? {} : { withinMinutes: args.withinMinutes },
         ...args.maxToolChars === undefined ? {} : { maxToolChars: args.maxToolChars },
         signal: exec.signal,
@@ -91,5 +97,12 @@ export function apply(ctx: Context): void {
   }
 }
 
-export { buildReaderArgs, GROK_SESSION_READER_PATH, runSessionReader, SESSION_READER_PATH } from './reader.ts'
+export {
+  buildReaderArgs,
+  GROK_SESSION_READER_PATH,
+  runSessionReader,
+  SESSION_READER_PATH,
+  slashReferenceFromSession,
+  slashReferenceFromUserText,
+} from './reader.ts'
 export { RESUME_SKILL_SPECS, resumeSkillContent, skillRegistration } from './skills.ts'
