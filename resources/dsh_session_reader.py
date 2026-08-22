@@ -991,14 +991,33 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _core_argv(args: argparse.Namespace) -> list[str]:
+    """Grok's parser only accepts the optional ref before flags."""
+    forwarded = [args.tool, args.action]
+    if args.ref is not None:
+        forwarded.append(args.ref)
+    forwarded.extend(
+        [
+            "--cwd",
+            args.cwd,
+            "--within-min",
+            str(args.within_min),
+            "--max-tool-chars",
+            str(args.max_tool_chars),
+        ]
+    )
+    if args.json:
+        forwarded.append("--json")
+    return forwarded
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if arguments and arguments[0] in core.TOOLS:
-        return core.main(arguments)
     parser = _build_parser()
-    args = parser.parse_args(arguments)
+    # The DSH tool passes `--json -- <ref>`. Grok's parse_args rejects that order.
+    args = parser.parse_intermixed_args(arguments)
     if args.tool in core.TOOLS:
-        return core.main(arguments)
+        return core.main(_core_argv(args))
     if args.within_min < 0:
         parser.error("--within-min must be non-negative")
     if args.max_tool_chars < 1:

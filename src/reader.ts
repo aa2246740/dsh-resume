@@ -9,6 +9,52 @@ export type ForeignSessionProvider = typeof FOREIGN_SESSION_PROVIDERS[number]
 export const FOREIGN_SESSION_ACTIONS = ['show', 'list'] as const
 export type ForeignSessionAction = typeof FOREIGN_SESSION_ACTIONS[number]
 
+/**
+ * Pull `/resume-<provider> <ref>` from the triggering user message.
+ * `latest` and a bare slash stay undefined so show still means newest.
+ */
+export function slashReferenceFromUserText(
+  text: string,
+  provider: ForeignSessionProvider,
+): string | undefined {
+  const token = `/resume-${provider}`
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = text.match(new RegExp(`(?:^|[\\s\\n])${escaped}(?:\\s+([^\\s/]+))?`, 'i'))
+  if (!match) return undefined
+  const ref = match[1]?.trim()
+  if (!ref || ref.toLowerCase() === 'latest') return undefined
+  return ref
+}
+
+function eventText(event: unknown): { type?: string, text: string } {
+  if (!event || typeof event !== 'object') return { text: '' }
+  const record = event as { type?: string, data?: { content?: unknown } }
+  const content = record.data?.content
+  if (typeof content === 'string') return { type: record.type, text: content }
+  if (!Array.isArray(content)) return { type: record.type, text: '' }
+  const text = content
+    .map(part => (part && typeof part === 'object' && 'text' in part ? String(part.text ?? '') : ''))
+    .join('\n')
+  return { type: record.type, text }
+}
+
+/** Walk recent user messages for a slash reference the model omitted. */
+export function slashReferenceFromSession(
+  events: readonly unknown[] | undefined,
+  provider: ForeignSessionProvider,
+): string | undefined {
+  if (!events) return undefined
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const { type, text } = eventText(events[index])
+    if (type !== 'user/message' || !text) continue
+    if (text.includes('<skill_content') || text.startsWith('Current runtime context')) continue
+    const inferred = slashReferenceFromUserText(` ${text}`, provider)
+    if (inferred) return inferred
+    if (new RegExp(`/resume-${provider}\\b`, 'i').test(text)) return undefined
+  }
+  return undefined
+}
+
 const DEFAULT_MAX_TOOL_CHARS = 300
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 const MAX_STDERR_BYTES = 256 * 1024

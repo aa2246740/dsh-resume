@@ -3,7 +3,27 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
-import { buildReaderArgs, runSessionReader } from '../src/reader.ts'
+import {
+  buildReaderArgs,
+  runSessionReader,
+  slashReferenceFromSession,
+  slashReferenceFromUserText,
+} from '../src/reader.ts'
+
+test('slashReferenceFromUserText keeps latest empty and checkout intact', () => {
+  assert.equal(slashReferenceFromUserText('/resume-claude latest', 'claude'), undefined)
+  assert.equal(slashReferenceFromUserText('/resume-claude', 'claude'), undefined)
+  assert.equal(slashReferenceFromUserText('/resume-claude checkout', 'claude'), 'checkout')
+  assert.equal(slashReferenceFromUserText('please /resume-claude checkout now', 'claude'), 'checkout')
+})
+
+test('slashReferenceFromSession reads the triggering user message', () => {
+  const events = [
+    { type: 'user/message', data: { content: [{ type: 'text', text: '/resume-claude checkout' }] } },
+    { type: 'user/message', data: { content: [{ type: 'text', text: '<skill_content name="resume-claude">' }] } },
+  ]
+  assert.equal(slashReferenceFromSession(events, 'claude'), 'checkout')
+})
 
 test('buildReaderArgs keeps a leading-dash reference inert', () => {
   assert.deepEqual(buildReaderArgs({
