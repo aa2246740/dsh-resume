@@ -30,22 +30,28 @@ If a title matches more than one session, it stops. The official UI lists the ca
 
 ## Install
 
-DeepSeek Harness `0.1.0-rc.8`, Node.js `22.19+` or `24+`, pnpm `11.7`, and Python 3. `zstd` is only needed for a compressed Codex rollout. Use [dshx](https://github.com/aa2246740/dsh-external-plugin-devkit) to check and activate.
+You do **not** need dshx. The default path is official `dsh`.
+
+DeepSeek Harness `0.1.0-rc.8`, Node.js `22.19+` or `24+`, and Python 3. `zstd` is only needed for a compressed Codex rollout.
 
 ```sh
-git clone https://github.com/aa2246740/dsh-resume.git \
-  /absolute/path/to/deepseek-harness/my-plugins/dsh-resume
-cd /absolute/path/to/deepseek-harness/my-plugins/dsh-resume
-corepack pnpm install --frozen-lockfile
-pnpm build
-dshx check dsh-resume --harness /absolute/path/to/deepseek-harness
-dshx activation-plan dsh-resume --change patch \
-  --harness /absolute/path/to/deepseek-harness
+dsh plugin --profile web add github:aa2246740/dsh-resume
 ```
 
-Follow the `patch` plan from dshx and add the Host plugin to the profile's watched `cordis.patch.yml`. There is no client bundle, so a browser refresh is usually unnecessary — still confirm the slash commands showed up. Do not mount it through both a bundle and a patch.
+Or from a clone:
 
-`cordis.yml` points at the built `lib/dsh-resume.js`, so run `pnpm build` before activation. A successful clone is not proof the commands are live.
+```sh
+git clone https://github.com/aa2246740/dsh-resume.git
+dsh plugin --profile web add ./dsh-resume
+```
+
+Then **restart that DSH Host**. There is no client bundle, so a browser refresh is usually unnecessary — still confirm the slash commands showed up. `dsh plugin add` writes the profile; it does not hot-load a running Host. Do not mount it through both a bundle and a patch.
+
+Remove:
+
+```sh
+dsh plugin --profile web remove dsh-resume
+```
 
 ## It resumes the work, not the old process
 
@@ -65,6 +71,10 @@ Read-only: no supported foreign session store is modified. System prompts, hidde
 corepack pnpm install
 pnpm check
 ```
+
+## Optional: dshx
+
+Already using an Agent against a Harness checkout? Install [dshx](https://github.com/aa2246740/dsh-external-plugin-devkit), then give the Agent both that repo and this one (`https://github.com/aa2246740/dsh-resume`). It can take it from there.
 
 ## License
 

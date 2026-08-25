@@ -30,22 +30,28 @@
 
 ## 装上
 
-DeepSeek Harness `0.1.0-rc.8`，Node.js `22.19+` 或 `24+`，pnpm `11.7`，Python 3。Codex 的压缩 rollout 才需要 `zstd`。检查和激活用 [dshx](https://github.com/aa2246740/dsh-external-plugin-devkit)。
+不需要 dshx。默认走官方 `dsh`。
+
+DeepSeek Harness `0.1.0-rc.8`，Node.js `22.19+` 或 `24+`，Python 3。Codex 的压缩 rollout 才需要 `zstd`。
 
 ```sh
-git clone https://github.com/aa2246740/dsh-resume.git \
-  /absolute/path/to/deepseek-harness/my-plugins/dsh-resume
-cd /absolute/path/to/deepseek-harness/my-plugins/dsh-resume
-corepack pnpm install --frozen-lockfile
-pnpm build
-dshx check dsh-resume --harness /absolute/path/to/deepseek-harness
-dshx activation-plan dsh-resume --change patch \
-  --harness /absolute/path/to/deepseek-harness
+dsh plugin --profile web add github:aa2246740/dsh-resume
 ```
 
-按 dshx 给出的 `patch` 计划，把这条 Host 插件写进 profile 的 `cordis.patch.yml`。它没有 client 包，一般不用刷新浏览器，但要确认斜杠命令已经出现。不要同时用 bundle 和 patch 挂两份。
+或本地 clone：
 
-`cordis.yml` 指向编好的 `lib/dsh-resume.js`，所以得先 `pnpm build`。克隆成功不等于命令已经活了。
+```sh
+git clone https://github.com/aa2246740/dsh-resume.git
+dsh plugin --profile web add ./dsh-resume
+```
+
+然后**重启这个 DSH Host**。它没有 client 包，一般不用刷新浏览器，但要确认斜杠命令已经出现。`dsh plugin add` 只写 profile，不会热挂正在跑的 Host。不要同时用 bundle 和 patch 挂两份。
+
+卸载：
+
+```sh
+dsh plugin --profile web remove dsh-resume
+```
 
 ## 接着做，不是把旧进程拉起来
 
@@ -65,6 +71,10 @@ dshx activation-plan dsh-resume --change patch \
 corepack pnpm install
 pnpm check
 ```
+
+## Optional: dshx
+
+已经在用 Agent 对着一份 Harness 检出干活？先装 [dshx](https://github.com/aa2246740/dsh-external-plugin-devkit)，再把那个仓库和本仓库（`https://github.com/aa2246740/dsh-resume`）一起交给 Agent。后面它自己会装。
 
 ## 许可
 
