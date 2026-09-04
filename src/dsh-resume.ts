@@ -67,7 +67,7 @@ export function apply(ctx: Context): void {
       const action = args.action ?? 'show'
       const inferred = args.reference?.trim()
         || (action === 'show'
-          ? slashReferenceFromSession(exec.agent?.session.events, args.provider)
+          ? slashReferenceFromSession(exec.agent?.session.snapshotEvents(), args.provider)
           : undefined)
       return await runSessionReader({
         provider: args.provider,

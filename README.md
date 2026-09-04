@@ -32,7 +32,7 @@
 
 不需要 dshx。默认走官方 `dsh`。
 
-DeepSeek Harness `0.1.0-rc.8`，Node.js `22.19+` 或 `24+`，Python 3。Codex 的压缩 rollout 才需要 `zstd`。
+DeepSeek Harness `0.1.2-rc.1`，Node.js `22.19+` 或 `24+`，Python 3。Codex 的压缩 rollout 才需要 `zstd`。
 
 ```sh
 dsh plugin --profile web add github:aa2246740/dsh-resume

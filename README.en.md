@@ -32,7 +32,7 @@ If a title matches more than one session, it stops. The official UI lists the ca
 
 You do **not** need dshx. The default path is official `dsh`.
 
-DeepSeek Harness `0.1.0-rc.8`, Node.js `22.19+` or `24+`, and Python 3. `zstd` is only needed for a compressed Codex rollout.
+DeepSeek Harness `0.1.2-rc.1`, Node.js `22.19+` or `24+`, and Python 3. `zstd` is only needed for a compressed Codex rollout.
 
 ```sh
 dsh plugin --profile web add github:aa2246740/dsh-resume
