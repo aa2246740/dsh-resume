@@ -26,8 +26,8 @@ export function slashReferenceFromUserText(
   return ref
 }
 
-function eventText(event: unknown): { type?: string, text: string } {
-  if (!event || typeof event !== 'object') return { text: '' }
+function eventText(event: unknown): { type: string | undefined, text: string } {
+  if (!event || typeof event !== 'object') return { type: undefined, text: '' }
   const record = event as { type?: string, data?: { content?: unknown } }
   const content = record.data?.content
   if (typeof content === 'string') return { type: record.type, text: content }

@@ -233,6 +233,7 @@ test('Grok adapter reads only visible updates and keeps calls, results, and plan
     current_model_id: 'grok-code-fast',
     git_root_dir: root,
     head_commit: 'fixture-commit',
+    head_branch: 'fixture-branch',
     chat_format_version: 1,
   }))
   const update = (sessionUpdate: string, value: Record<string, unknown>) => ({
@@ -244,9 +245,10 @@ test('Grok adapter reads only visible updates and keeps calls, results, and plan
     },
   })
   const records = [
-    update('user_message_chunk', { content: 'Continue the Grok fixture.' }),
+    update('user_message_chunk', { content: { type: 'image', mimeType: 'image/png', data: 'omitted' } }),
+    update('user_message_chunk', { content: { type: 'text', text: 'Continue the Grok fixture.' } }),
     update('agent_thought_chunk', { content: 'GROK_PRIVATE_THOUGHT' }),
-    update('agent_message_chunk', { content: 'Prepared the visible Grok change.' }),
+    update('agent_message_chunk', { content: { type: 'text', text: 'Prepared the visible Grok change.' } }),
     update('tool_call', {
       toolCallId: 'grok-call-1',
       title: 'Run tests',
@@ -280,22 +282,29 @@ test('Grok adapter reads only visible updates and keeps calls, results, and plan
     tool: string
     turns: Array<{
       inert: boolean
+      text: string
       tool_calls?: Array<{ name: string, inert: boolean }>
       tool_results?: Array<{ content: string, inert: boolean }>
     }>
     plan: Array<{ content: string, inert: boolean }>
     warnings: Array<{ code: string }>
     last_user_request: string
+    last_assistant_action: string
+    branch: string
   }
 
   assert.equal(result.tool, 'grok')
-  assert.equal(result.last_user_request, 'Continue the Grok fixture.')
+  assert.equal(result.branch, 'fixture-branch')
+  assert.equal(result.last_user_request, '[image content unavailable] Continue the Grok fixture.')
+  assert.equal(result.last_assistant_action, 'called inert foreign tool(s): shell')
+  assert.ok(result.turns.some(turn => turn.text === 'Prepared the visible Grok change.'))
   assert.ok(result.turns.every(turn => turn.inert === true))
   assert.ok(result.turns.some(turn => turn.tool_calls?.some(call => call.name === 'shell' && call.inert === true)))
   assert.ok(result.turns.some(turn => turn.tool_results?.some(output => output.content.includes('focused tests passed') && output.inert === true)))
   assert.deepEqual(result.plan, [{ content: 'Publish after verification', status: 'pending', inert: true }])
   assert.ok(result.warnings.some(warning => warning.code === 'hidden_reasoning_skipped'))
   assert.ok(result.warnings.some(warning => warning.code === 'hook_records_skipped'))
+  assert.ok(result.warnings.some(warning => warning.code === 'message_content_unavailable'))
   assert.doesNotMatch(raw, /GROK_PRIVATE_THOUGHT|GROK_PRIVATE_HOOK/)
 })
 

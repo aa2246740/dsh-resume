@@ -75,8 +75,33 @@ def _bounded_text(value: Any, limit: int) -> str:
     return text[:limit] + "..."
 
 
-def _append_text_turn(turns: list[dict[str, Any]], role: str, value: Any) -> None:
-    text = core._safe_text(value)
+def _grok_message_text(
+    value: Any,
+    warnings: list[dict[str, str]],
+) -> str:
+    parts: list[str] = []
+    for block in core._blocks(value):
+        block_type = block.get("type")
+        if block_type == "text" and isinstance(block.get("text"), str):
+            parts.append(core._safe_text(block["text"]))
+            continue
+        label = core._one_line(block_type or "unknown", 40).replace("_", " ")
+        parts.append(f"[{label} content unavailable]")
+        core._add_warning(
+            warnings,
+            "message_content_unavailable",
+            "Grok non-text message content was marked unavailable.",
+        )
+    return "\n".join(parts)
+
+
+def _append_text_turn(
+    turns: list[dict[str, Any]],
+    role: str,
+    value: Any,
+    warnings: list[dict[str, str]],
+) -> None:
+    text = _grok_message_text(value, warnings)
     if not text:
         return
     if (
@@ -86,7 +111,13 @@ def _append_text_turn(turns: list[dict[str, Any]], role: str, value: Any) -> Non
         and not turns[-1].get("tool_results")
     ):
         existing = core._safe_text(turns[-1].get("text"))
-        turns[-1]["text"] = existing + text
+        separator = (
+            "\n"
+            if existing.endswith(" content unavailable]")
+            or text.startswith("[") and " content unavailable]" in text.splitlines()[0]
+            else ""
+        )
+        turns[-1]["text"] = existing + separator + text
         return
     turns.append(core._turn(role, text=text))
 
@@ -206,7 +237,11 @@ class GrokAdapter(ProviderAdapter):
             "path": str(session_dir),
             "title": core._safe_text(title) if title else None,
             "cwd": core._safe_text(actual_cwd) if actual_cwd else None,
-            "branch": None,
+            "branch": (
+                core._safe_text(summary.get("head_branch"))
+                if isinstance(summary.get("head_branch"), str)
+                else None
+            ),
             "created_at": core._iso_from_millis(created_ms),
             "updated_at_ms": updated_ms,
             "updated_at": core._iso_from_millis(updated_ms),
@@ -340,9 +375,9 @@ class GrokAdapter(ProviderAdapter):
                 continue
             update_type = update.get("sessionUpdate") or update.get("type")
             if update_type == "user_message_chunk":
-                _append_text_turn(turns, "user", update.get("content"))
+                _append_text_turn(turns, "user", update.get("content"), warnings)
             elif update_type == "agent_message_chunk":
-                _append_text_turn(turns, "assistant", update.get("content"))
+                _append_text_turn(turns, "assistant", update.get("content"), warnings)
             elif update_type == "agent_thought_chunk":
                 hidden_thoughts += 1
             elif update_type == "hook_execution":
@@ -450,7 +485,7 @@ class GrokAdapter(ProviderAdapter):
             "path": str(session_dir),
             "title": candidate.get("title"),
             "cwd": candidate.get("cwd"),
-            "branch": None,
+            "branch": candidate.get("branch"),
             "created_at": created,
             "updated_at": updated,
             "source_repo_root_path": candidate.get("source_repo_root_path"),
