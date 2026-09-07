@@ -1,38 +1,24 @@
 # dsh-resume
 
-[English](README.en.md) · [中文](README.md)
+[中文](README.md)
 
-Continue a Codex, Claude Code, Cursor, Grok, or Pi session inside DeepSeek Harness.
+Continue unfinished Codex, Claude Code, Cursor, Grok, or Pi work inside DeepSeek Harness.
 
-Type `/resume-claude` (or one of the other four). It reads that local session, keeps what you still need, and writes a short handoff. It does not restart the old process, and it does not touch anyone else's session files.
+Type `/resume-claude`, or the matching command for the other four. The plugin reads that local session, pulls context that can still be handed off, and writes a card into the current DSH chat. It does not restart the old process or rewrite anyone else's session files.
 
-Unofficial. Not affiliated with DeepSeek, OpenAI, Anthropic, Cursor, xAI, or Pi.
+![Composer with /resume-claude typed](docs/screenshots/composer-resume-claude.png)
 
-## What it looks like
+![Sending /resume-claude latest writes a six-section handoff](docs/screenshots/handoff.gif)
 
-These shots are official DeepSeek Harness Web. The demo content is a public checkout-widget session (tax rounding), not anyone's private log.
+![Handoff card: done, remaining, next](docs/screenshots/handoff.png)
 
-Type `/resume-claude` in the official composer. The slash skill shows up.
+![Two title matches listed as candidates](docs/screenshots/candidates.png)
 
-![Official DeepSeek Harness composer with /resume-claude typed. Chrome is visible.](docs/screenshots/composer-resume-claude.png)
-
-Send `/resume-claude latest`. The handoff lands in the current DSH session.
-
-![Type and send /resume-claude latest in the official composer. The six-part handoff appears.](docs/screenshots/handoff.gif)
-
-Same six parts as Grok: goal, files, done, still open, stopping point, reader warnings.
-
-![Six-part handoff in a DSH session: open 0.5-cent rounding case, next step, reader warnings.](docs/screenshots/handoff.png)
-
-If a title matches more than one session, it stops. The official UI lists the candidates.
-
-![`/resume-claude checkout` hits two sessions. The official picker shows tax rounding and shipping estimate.](docs/screenshots/candidates.png)
+The six sections are objective, files, done, remaining, stopped at, and reader warnings. If a title is ambiguous it lists candidates instead of guessing.
 
 ## Install
 
-You do **not** need dshx. The default path is official `dsh`.
-
-DeepSeek Harness `0.1.2-rc.1`, Node.js `22.19+` or `24+`, and Python 3. `zstd` is only needed for a compressed Codex rollout.
+DeepSeek Harness `0.1.2-rc.1`, Node.js `22.19+` or `24+`, Python 3. `zstd` is only needed for compressed Codex rollouts.
 
 ```sh
 dsh plugin --profile web add github:aa2246740/dsh-resume
@@ -45,25 +31,23 @@ git clone https://github.com/aa2246740/dsh-resume.git
 dsh plugin --profile web add ./dsh-resume
 ```
 
-Then **restart that DSH Host**. There is no client bundle, so a browser refresh is usually unnecessary — still confirm the slash commands showed up. `dsh plugin add` writes the profile; it does not hot-load a running Host. Do not mount it through both a bundle and a patch.
-
-Remove:
+Then restart that DSH Host. There is no client bundle, so a browser reload is usually unnecessary. Confirm the slash commands appeared. Do not mount it through both a bundle and a patch.
 
 ```sh
 dsh plugin --profile web remove dsh-resume
 ```
 
-## It resumes the work, not the old process
+## Commands
 
-Read-only: no supported foreign session store is modified. System prompts, hidden reasoning, and encrypted or broken records are dropped or marked unavailable. Claims from history stay `HISTORY_REPORTED` until this turn checks them in the current repo (`CURRENT_OBSERVED`). Grok is read from the visible `updates.jsonl` stream only. Pi follows the current active branch only.
+Read-only. Foreign session stores are not modified. System prompts, hidden reasoning, encrypted or corrupt records are dropped or marked unavailable. History conclusions start as `HISTORY_REPORTED`. Only facts checked in the current workspace this turn are `CURRENT_OBSERVED`. Grok reads visible `updates.jsonl` only. Pi follows the current branch only.
 
-| Command | Continues |
+| Command | Source |
 | --- | --- |
-| `/resume-codex [latest \| session-id \| path \| title]` | Codex CLI / app |
-| `/resume-claude [latest \| session-id \| path \| title]` | Claude Code |
-| `/resume-cursor [latest \| session-id \| path \| title]` | Cursor |
-| `/resume-grok [latest \| session-id \| path \| title]` | Grok |
-| `/resume-pi [latest \| session-id \| path \| title]` | Pi |
+| `/resume-codex [latest \| session id \| path \| title]` | Codex CLI / app |
+| `/resume-claude [latest \| session id \| path \| title]` | Claude Code |
+| `/resume-cursor [latest \| session id \| path \| title]` | Cursor |
+| `/resume-grok [latest \| session id \| path \| title]` | Grok |
+| `/resume-pi [latest \| session id \| path \| title]` | Pi |
 
 ## Develop
 
@@ -71,10 +55,6 @@ Read-only: no supported foreign session store is modified. System prompts, hidde
 corepack pnpm install
 pnpm check
 ```
-
-## Optional: dshx
-
-Already using an Agent against a Harness checkout? Install [dshx](https://github.com/aa2246740/dsh-external-plugin-devkit), then give the Agent both that repo and this one (`https://github.com/aa2246740/dsh-resume`). It can take it from there.
 
 ## License
 
