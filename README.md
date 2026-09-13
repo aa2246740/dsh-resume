@@ -2,6 +2,25 @@
 
 [English](README.en.md)
 
+```sh
+dsh plugin --profile web add github:aa2246740/dsh-resume
+```
+
+`dsh plugin add` 在 web profile 里跑 **pnpm**。PATH 上要有 `dsh`（或 `npx @deepseek-ai/dsh`）和 pnpm。这条命令只写 profile，不会热挂正在跑的 Host。然后重启这个 Host，刷新页面。确认斜杠命令已经出现。不要同时用 bundle 和 patch 挂两份。
+
+面向官方 DeepSeek Harness `0.1.5-rc.2`。仓库已提交编好的 `lib/`，并声明了 `dsh.bundle.patch`，所以 `github:` 安装不用再构建。Node.js `22.19+` 或 `24+`，Python 3。Codex 的压缩 rollout 才需要 `zstd`。
+
+本地 clone：
+
+```sh
+git clone https://github.com/aa2246740/dsh-resume.git
+dsh plugin --profile web add ./dsh-resume
+```
+
+```sh
+dsh plugin --profile web remove dsh-resume
+```
+
 在 DeepSeek Harness 里接着做 Codex、Claude Code、Cursor、Grok、Pi 没做完的事。
 
 输入 `/resume-claude`，另外四条同理。它只读本机那次会话，抽出还能接手的上下文，写成一张交接卡。旧进程不会被拉起来，别人的会话文件也不会被改。
@@ -15,27 +34,6 @@
 ![标题命中两条会话时列出候选](docs/screenshots/candidates.png)
 
 六段按目标、文件、做到哪、还差什么、停在哪、读者警告来写。标题对不上号时不会猜，会列出候选让你挑。
-
-## 安装
-
-DeepSeek Harness `0.1.2-rc.1`，Node.js `22.19+` 或 `24+`，Python 3。Codex 的压缩 rollout 才需要 `zstd`。
-
-```sh
-dsh plugin --profile web add github:aa2246740/dsh-resume
-```
-
-或本地 clone：
-
-```sh
-git clone https://github.com/aa2246740/dsh-resume.git
-dsh plugin --profile web add ./dsh-resume
-```
-
-然后重启这个 DSH Host。它没有 client 包，一般不用刷新浏览器，但要确认斜杠命令已经出现。不要同时用 bundle 和 patch 挂两份。
-
-```sh
-dsh plugin --profile web remove dsh-resume
-```
 
 ## 命令
 

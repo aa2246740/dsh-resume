@@ -1,5 +1,5 @@
 # portable overlay: relative name only. --patch resolves against the profile
-# directory, so cold-boot through `dshx start` / `dshx verify-boot`, not raw pnpm dsh.
+# directory, not a raw `pnpm dsh` from this checkout.
 - insert:
     - id: dsh-resume
       name: './lib/dsh-resume.js'
