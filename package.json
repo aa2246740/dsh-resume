@@ -1,6 +1,6 @@
 {
   "name": "dsh-resume",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Continue Codex, Claude Code, Cursor, Grok, and Pi work in DeepSeek Harness.",
   "type": "module",
   "main": "lib/dsh-resume.js",
@@ -56,14 +56,23 @@
   ],
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
-    "@deepseek-ai/dsh-skill": "^0.1.2-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.1.2-rc.1"
+    "@deepseek-ai/dsh-skill": "^0.1.5-rc.2",
+    "@deepseek-ai/dsh-tools": "^0.1.5-rc.2"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.2",
-    "@deepseek-ai/dsh-skill": "0.1.2-rc.1",
-    "@deepseek-ai/dsh-system-prompt": "0.1.2-rc.1",
-    "@deepseek-ai/dsh-tools": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-agent": "0.1.5-rc.3",
+    "@deepseek-ai/dsh-code-runtime": "0.1.5-rc.3",
+    "@deepseek-ai/dsh-invariants": "0.1.5-rc.3",
+    "@deepseek-ai/dsh-llm": "0.1.5-rc.3",
+    "@deepseek-ai/dsh-scope": "0.1.5-rc.3",
+    "@deepseek-ai/dsh-session": "0.1.5-rc.3",
+    "@deepseek-ai/dsh-session-projection": "0.1.5-rc.3",
+    "@deepseek-ai/dsh-skill": "0.1.5-rc.3",
+    "@deepseek-ai/dsh-system-prompt": "0.1.5-rc.3",
+    "@deepseek-ai/dsh-tools": "0.1.5-rc.3",
+    "@deepseek-ai/dsh-user-approval": "0.1.5-rc.3",
+    "semver": "^7.7.2",
     "@types/node": "^22.20.0",
     "tsdown": "^0.22.2",
     "tsx": "^4.22.4",
