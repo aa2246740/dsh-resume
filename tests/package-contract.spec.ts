@@ -28,14 +28,27 @@ test('stock dsh plugin add can mount this package as a bundle', () => {
   assert.ok(manifest.keywords?.includes('dsh-plugin'))
 })
 
-test('Harness peer ranges accept 0.1.5-rc.3 and reject the old prerelease caret', () => {
+test('Harness peer ranges accept 0.1.7-rc.1 and reject 0.1.7 alphas', () => {
   const skill = manifest.peerDependencies?.['@deepseek-ai/dsh-skill']
   const tools = manifest.peerDependencies?.['@deepseek-ai/dsh-tools']
-  assert.equal(skill, '^0.1.5-rc.2')
-  assert.equal(tools, '^0.1.5-rc.2')
-  assert.equal(semver.satisfies('0.1.5-rc.3', '^0.1.2-rc.1'), false)
-  assert.equal(semver.satisfies('0.1.5-rc.3', skill), true)
-  assert.equal(semver.satisfies('0.1.5-rc.3', tools), true)
-  assert.equal(semver.satisfies('0.1.7-alpha.2', skill), false)
-  assert.equal(semver.satisfies('0.1.7-alpha.2', tools), false)
+  const range = '>=0.1.7-rc.1 <0.1.8'
+  const boot = { includePrerelease: true }
+  assert.equal(skill, range)
+  assert.equal(tools, range)
+  assert.equal(semver.satisfies('4.0.4', manifest.peerDependencies?.['@deepseek-ai/cordis']), true)
+  for (const spec of [skill, tools]) {
+    assert.ok(spec)
+    assert.equal(semver.satisfies('0.1.7-rc.1', spec), true)
+    assert.equal(semver.satisfies('0.1.7-rc.1', spec, boot), true)
+    assert.equal(semver.satisfies('0.1.5-rc.3', spec), false)
+    assert.equal(semver.satisfies('0.1.5-rc.3', spec, boot), false)
+    assert.equal(semver.satisfies('0.1.7-alpha.1', spec), false)
+    assert.equal(semver.satisfies('0.1.7-alpha.1', spec, boot), false)
+    assert.equal(semver.satisfies('0.1.7-alpha.2', spec), false)
+    assert.equal(semver.satisfies('0.1.7-alpha.2', spec, boot), false)
+    assert.equal(semver.satisfies('0.1.8.0', spec, boot), false)
+  }
+  assert.equal(semver.satisfies('0.1.7-rc.1', '^0.1.5-rc.2'), false)
+  assert.equal(semver.satisfies('0.1.7-alpha.2', '^0.1.5-rc.2', boot), true)
+  assert.equal(semver.satisfies('0.1.8-alpha.1', range, boot), true)
 })

@@ -8,7 +8,7 @@ dsh plugin --profile web add github:aa2246740/dsh-resume
 
 `dsh plugin add` runs **pnpm** in the web profile. `dsh` (or `npx @deepseek-ai/dsh`) and pnpm must be on `PATH`. The command only writes the profile; it does not hot-load a running Host. Then restart that Host and reload the page. Confirm the slash commands appeared. Do not mount it through both a bundle and a patch.
 
-Built for official DeepSeek Harness `0.1.5-rc.3`. This repo commits `lib/` and declares `dsh.bundle.patch`, so a `github:` install does not need a build. Node.js `22.19+` or `24+`, Python 3. `zstd` is only needed for compressed Codex rollouts.
+Built for official DeepSeek Harness `0.1.7-rc.1`. This repo commits `lib/` and declares `dsh.bundle.patch`, so a `github:` install does not need a build. Node.js `22.19+` or `24+`, Python 3. `zstd` is only needed for compressed Codex rollouts.
 
 From a clone:
 
