@@ -8,7 +8,7 @@ dsh plugin --profile web add github:aa2246740/dsh-resume
 
 `dsh plugin add` 在 web profile 里跑 **pnpm**。PATH 上要有 `dsh`（或 `npx @deepseek-ai/dsh`）和 pnpm。这条命令只写 profile，不会热挂正在跑的 Host。然后重启这个 Host，刷新页面。确认斜杠命令已经出现。不要同时用 bundle 和 patch 挂两份。
 
-面向官方 DeepSeek Harness `0.1.7-rc.1`。仓库已提交编好的 `lib/`，并声明了 `dsh.bundle.patch`，所以 `github:` 安装不用再构建。Node.js `22.19+` 或 `24+`，Python 3。Codex 的压缩 rollout 才需要 `zstd`。
+面向官方 DeepSeek Harness `0.1.7-rc.2`。仓库已提交编好的 `lib/`，并声明了 `dsh.bundle.patch`，所以 `github:` 安装不用再构建。Node.js `22.19+` 或 `24+`，Python 3。Codex 的压缩 rollout 才需要 `zstd`。
 
 本地 clone：
 
