@@ -2,26 +2,47 @@
 
 [中文](README.md)
 
+Bring local Codex, Claude Code, Cursor, Grok, and Pi session context into DeepSeek Harness to continue unfinished work.
+
+## Install
+
+**Version 0.2.3 is verified against DeepSeek Harness 0.1.7-rc.2.** Both the package and repository contain compiled plugin files; no Harness source checkout or local build is required. Python 3 is required to read history. Compressed Codex rollouts additionally require `zstd`.
+
+### Official Desktop app
+
+1. Open **Plugins → Add plugin** (under Settings in some versions).
+2. Enter `github:aa2246740/dsh-resume#v0.2.3` in **Package name or address**, then install and enable it.
+3. Follow the installer's activation instructions. Type `/resume-` in the composer and check that all five commands below appear.
+
+Alternatively, download `dsh-resume-0.2.3.tgz` from the [v0.2.3 Release](https://github.com/aa2246740/dsh-resume/releases/tag/v0.2.3) and enter its absolute path in the same installer. Desktop uses its own profile; do not use Web Host commands to install into Desktop.
+
+### Web Host
+
+Use the official CLI:
+
 ```sh
-dsh plugin --profile web add github:aa2246740/dsh-resume
+dsh plugin --profile web add github:aa2246740/dsh-resume#v0.2.3
 ```
 
-`dsh plugin add` runs **pnpm** in the web profile. `dsh` (or `npx @deepseek-ai/dsh`) and pnpm must be on `PATH`. The command only writes the profile; it does not hot-load a running Host. Then restart that Host and reload the page. Confirm the slash commands appeared. Do not mount it through both a bundle and a patch.
-
-Built for official DeepSeek Harness `0.1.7-rc.1`. This repo commits `lib/` and declares `dsh.bundle.patch`, so a `github:` install does not need a build. Node.js `22.19+` or `24+`, Python 3. `zstd` is only needed for compressed Codex rollouts.
-
-From a clone:
+Or, from the downloaded archive's directory:
 
 ```sh
-git clone https://github.com/aa2246740/dsh-resume.git
-dsh plugin --profile web add ./dsh-resume
+dsh plugin --profile web add ./dsh-resume-0.2.3.tgz
 ```
+
+The official `dsh` command and pnpm must be available. Node.js must be `^22.19.0` or `>=24.0.0`. Use the existing Web Host's `DSH_HOME`. This only installs into the Web profile, not Desktop. Follow the official installer's activation result. If it requests a restart, exit and reopen the original Host normally; do not start another Host alongside it.
+
+### Upgrade and remove
+
+Repeat the matching installation steps to upgrade. If migrating from a manual mount, disable the old duplicate entry and retain only the package's `dsh-resume` instance.
+
+Remove through the Desktop plugin manager, or for Web:
 
 ```sh
 dsh plugin --profile web remove dsh-resume
 ```
 
-Continue unfinished Codex, Claude Code, Cursor, Grok, or Pi work inside DeepSeek Harness.
+## Usage
 
 Type `/resume-claude`, or the matching command for the other four. The plugin reads that local session, pulls context that can still be handed off, and writes a card into the current DSH chat. It does not restart the old process or rewrite anyone else's session files.
 
