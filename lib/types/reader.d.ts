@@ -1,4 +1,4 @@
-export declare const FOREIGN_SESSION_PROVIDERS: readonly ["claude", "codex", "cursor", "grok", "pi"];
+export declare const FOREIGN_SESSION_PROVIDERS: readonly ["claude", "codex", "cursor", "grok", "pi", "zcode"];
 export type ForeignSessionProvider = typeof FOREIGN_SESSION_PROVIDERS[number];
 export declare const FOREIGN_SESSION_ACTIONS: readonly ["show", "list"];
 export type ForeignSessionAction = typeof FOREIGN_SESSION_ACTIONS[number];

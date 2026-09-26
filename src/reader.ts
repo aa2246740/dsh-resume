@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const FOREIGN_SESSION_PROVIDERS = ['claude', 'codex', 'cursor', 'grok', 'pi'] as const
+export const FOREIGN_SESSION_PROVIDERS = ['claude', 'codex', 'cursor', 'grok', 'pi', 'zcode'] as const
 export type ForeignSessionProvider = typeof FOREIGN_SESSION_PROVIDERS[number]
 
 export const FOREIGN_SESSION_ACTIONS = ['show', 'list'] as const

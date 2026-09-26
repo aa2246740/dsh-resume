@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import {
   buildReaderArgs,
   runSessionReader,
@@ -484,4 +486,269 @@ test('Grok and Pi automatic discovery stays scoped to the current workspace', as
   ])
   assert.ok(grokList.sessions.every(session => session.cwd === resolve(root)))
   assert.ok(piList.sessions.every(session => session.cwd === resolve(root)))
+})
+
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
+const zcodeFixtureBuilder = join(repoRoot, 'tests', 'fixtures', 'zcode_session.py')
+const zcodeReader = join(repoRoot, 'resources', 'dsh_session_reader.py')
+
+function zcodeEnv(home: string): NodeJS.ProcessEnv {
+  return { ...process.env, ZCODE_HOME: home }
+}
+
+function buildZcodeFixture(home: string, cwd: string, otherCwd: string): void {
+  const result = spawnSync('python3', [
+    zcodeFixtureBuilder,
+    '--home',
+    home,
+    '--cwd',
+    cwd,
+    '--other-cwd',
+    otherCwd,
+  ], { encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+}
+
+test('ZCode sqlite discovery skips subagent children and keeps tool parts inert', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-zcode-'))
+  const previousHome = process.env.ZCODE_HOME
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.ZCODE_HOME
+    else process.env.ZCODE_HOME = previousHome
+    await rm(root, { recursive: true, force: true })
+  })
+  const home = join(root, 'zcode-home')
+  const cwd = join(root, 'workspace')
+  const other = join(root, 'other')
+  buildZcodeFixture(home, cwd, other)
+  await mkdir(join(home, 'projects', 'decoy'), { recursive: true })
+  await writeFile(join(home, 'projects', 'decoy', 'extra.jsonl'), `${JSON.stringify({
+    sessionId: 'zcode-jsonl-decoy',
+    role: 'user',
+    content: 'ZCODE_JSONL_DECOY',
+    cwd: resolve(cwd),
+    title: 'JSONL decoy',
+  })}\n`)
+  await mkdir(join(home, 'v2', 'sessions'), { recursive: true })
+  await writeFile(join(home, 'v2', 'sessions', 'abandoned.jsonl'), `${JSON.stringify({
+    role: 'user',
+    content: 'ZCODE_ABANDONED_V2',
+    cwd: resolve(cwd),
+  })}\n`)
+  process.env.ZCODE_HOME = home
+
+  const listed = JSON.parse(await runSessionReader({
+    provider: 'zcode',
+    action: 'list',
+    cwd,
+  })) as { sessions: Array<{ session_id: string, task_type: string | null }>, warnings: Array<{ code: string }> }
+  assert.deepEqual(listed.sessions.map(session => session.session_id), [
+    'zcode-session-gadget',
+    'zcode-session-widget',
+  ])
+  assert.ok(listed.sessions.every(session => session.task_type !== 'subagent_child'))
+  assert.ok(listed.warnings.every(warning => warning.code !== 'jsonl_fallback'))
+
+  const raw = await runSessionReader({
+    provider: 'zcode',
+    action: 'show',
+    cwd,
+    reference: 'zcode-session-widget',
+  })
+  const result = JSON.parse(raw) as {
+    tool: string
+    source: string
+    model: string
+    turns: Array<{
+      role: string
+      inert: boolean
+      text: string
+      tool_calls?: Array<{ name: string, inert: boolean }>
+      tool_results?: Array<{ content: string, inert: boolean }>
+    }>
+    summaries: Array<{ kind: string, inert: boolean, content: string }>
+    warnings: Array<{ code: string }>
+    last_user_request: string
+  }
+  assert.equal(result.tool, 'zcode')
+  assert.equal(result.source, 'zcode')
+  assert.equal(result.model, 'glm-4.6')
+  assert.equal(result.last_user_request, 'Continue the ZCode fixture.')
+  assert.deepEqual(result.turns.map(turn => turn.role), ['user', 'assistant', 'tool', 'assistant'])
+  assert.ok(result.turns.every(turn => turn.inert === true))
+  assert.ok(result.turns.some(turn => turn.text === 'Prepared the ZCode change.'))
+  assert.ok(result.turns.some(turn => turn.text === 'Summary after compaction.'))
+  assert.ok(result.turns.some(turn => turn.tool_calls?.some(call => call.name === 'bash' && call.inert === true)))
+  assert.ok(result.turns.some(turn => turn.tool_results?.some(output => output.content.includes('zcode focused tests passed') && output.inert === true)))
+  assert.ok(result.summaries.some(summary => summary.kind === 'compaction' && summary.inert === true))
+  assert.ok(result.warnings.some(warning => warning.code === 'hidden_reasoning_skipped'))
+  assert.ok(result.warnings.some(warning => warning.code === 'compaction_summary'))
+  assert.doesNotMatch(raw, /ZCODE_PRIVATE_REASONING|ZCODE_SUBAGENT_CHILD|ZCODE_OTHER_WORKSPACE|ZCODE_JSONL_DECOY|ZCODE_ABANDONED_V2/)
+
+  const child = JSON.parse(await runSessionReader({
+    provider: 'zcode',
+    action: 'show',
+    cwd,
+    reference: 'zcode-session-child',
+  })) as { session_id: string, turns: Array<{ text: string, inert: boolean }> }
+  assert.equal(child.session_id, 'zcode-session-child')
+  assert.ok(child.turns.some(turn => turn.text === 'ZCODE_SUBAGENT_CHILD' && turn.inert === true))
+})
+
+test('ZCode title ambiguity exits 2 and a missing or invalid database fails clearly', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-zcode-ref-'))
+  const previousHome = process.env.ZCODE_HOME
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.ZCODE_HOME
+    else process.env.ZCODE_HOME = previousHome
+    await rm(root, { recursive: true, force: true })
+  })
+  const home = join(root, 'zcode-home')
+  const cwd = join(root, 'workspace')
+  const other = join(root, 'other')
+  buildZcodeFixture(home, cwd, other)
+  process.env.ZCODE_HOME = home
+
+  const ambiguous = spawnSync('python3', [
+    zcodeReader,
+    'zcode',
+    'show',
+    'continue the zcode',
+    '--cwd',
+    cwd,
+    '--json',
+  ], { encoding: 'utf8', env: zcodeEnv(home) })
+  assert.equal(ambiguous.status, 2)
+  assert.match(ambiguous.stderr, /matched 2 sessions/)
+  assert.match(ambiguous.stderr, /zcode-session-widget/)
+  assert.match(ambiguous.stderr, /zcode-session-gadget/)
+
+  const unique = JSON.parse(await runSessionReader({
+    provider: 'zcode',
+    action: 'show',
+    cwd,
+    reference: 'widget',
+  })) as { session_id: string }
+  assert.equal(unique.session_id, 'zcode-session-widget')
+
+  const emptyHome = join(root, 'empty-home')
+  await mkdir(emptyHome)
+  process.env.ZCODE_HOME = emptyHome
+  const missing = JSON.parse(await runSessionReader({
+    provider: 'zcode',
+    action: 'list',
+    cwd,
+  })) as { sessions: unknown[], warnings: Array<{ code: string }> }
+  assert.deepEqual(missing.sessions, [])
+  assert.deepEqual(missing.warnings, [])
+  const missingShow = await runSessionReader({
+    provider: 'zcode',
+    action: 'show',
+    cwd,
+  })
+  assert.match(missingShow, /FOREIGN_SESSION_LOOKUP_NEEDS_INPUT/)
+  assert.match(missingShow, /no zcode session found/)
+
+  const brokenDb = join(root, 'broken-home', 'cli', 'db', 'db.sqlite')
+  await mkdir(dirname(brokenDb), { recursive: true })
+  const created = spawnSync('python3', ['-c', `
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+connection.execute("CREATE TABLE note (id TEXT)")
+connection.commit()
+connection.close()
+`, brokenDb], { encoding: 'utf8' })
+  assert.equal(created.status, 0, created.stderr)
+  const invalid = spawnSync('python3', [
+    zcodeReader,
+    'zcode',
+    'list',
+    '--cwd',
+    cwd,
+    '--json',
+  ], { encoding: 'utf8', env: zcodeEnv(join(root, 'broken-home')) })
+  assert.equal(invalid.status, 2)
+  assert.match(invalid.stderr, /missing required table/)
+})
+
+test('ZCode projects JSONL is only a warned fallback when sqlite is absent', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-zcode-jsonl-'))
+  const previousHome = process.env.ZCODE_HOME
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.ZCODE_HOME
+    else process.env.ZCODE_HOME = previousHome
+    await rm(root, { recursive: true, force: true })
+  })
+  const home = join(root, 'zcode-home')
+  const cwd = join(root, 'workspace')
+  await mkdir(join(home, 'projects', 'demo'), { recursive: true })
+  await mkdir(cwd)
+  const transcript = join(home, 'projects', 'demo', 'jsonl-session.jsonl')
+  const records = [
+    {
+      type: 'session',
+      id: 'jsonl-session-1',
+      cwd: resolve(cwd),
+      title: 'JSONL fallback session',
+      timestamp: '2026-08-20T04:00:00.000Z',
+    },
+    {
+      sessionId: 'jsonl-session-1',
+      role: 'user',
+      content: 'Continue from projects JSONL.',
+      cwd: resolve(cwd),
+      timestamp: '2026-08-20T04:00:01.000Z',
+    },
+    {
+      sessionId: 'jsonl-session-1',
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: 'ZCODE_JSONL_PRIVATE' },
+        { type: 'text', text: 'Read the fallback transcript.' },
+      ],
+      timestamp: '2026-08-20T04:00:02.000Z',
+    },
+  ]
+  await writeFile(transcript, `${records.map(record => JSON.stringify(record)).join('\n')}\n`)
+  await mkdir(join(home, 'cli', 'rollout'), { recursive: true })
+  await writeFile(join(home, 'cli', 'rollout', 'ephemeral.jsonl'), `${JSON.stringify({
+    role: 'user',
+    content: 'ZCODE_ROLLOUT_DECOY',
+    cwd: resolve(cwd),
+    sessionId: 'rollout-decoy',
+  })}\n`)
+  await mkdir(join(home, 'v2', 'sessions'), { recursive: true })
+  await writeFile(join(home, 'v2', 'sessions', 'abandoned.jsonl'), `${JSON.stringify({
+    role: 'user',
+    content: 'ZCODE_ABANDONED_V2',
+    cwd: resolve(cwd),
+    sessionId: 'v2-decoy',
+  })}\n`)
+  process.env.ZCODE_HOME = home
+
+  const listed = JSON.parse(await runSessionReader({
+    provider: 'zcode',
+    action: 'list',
+    cwd,
+  })) as { sessions: Array<{ session_id: string }>, warnings: Array<{ code: string }> }
+  assert.deepEqual(listed.sessions.map(session => session.session_id), ['jsonl-session-1'])
+  assert.ok(listed.warnings.some(warning => warning.code === 'jsonl_fallback'))
+
+  const raw = await runSessionReader({
+    provider: 'zcode',
+    action: 'show',
+    cwd,
+    reference: transcript,
+  })
+  const result = JSON.parse(raw) as {
+    source: string
+    turns: Array<{ role: string, inert: boolean, text: string }>
+    warnings: Array<{ code: string }>
+  }
+  assert.equal(result.source, 'zcode-projects-jsonl')
+  assert.deepEqual(result.turns.map(turn => turn.role), ['user', 'assistant'])
+  assert.ok(result.turns.every(turn => turn.inert === true))
+  assert.ok(result.warnings.some(warning => warning.code === 'jsonl_fallback'))
+  assert.ok(result.warnings.some(warning => warning.code === 'hidden_reasoning_skipped'))
+  assert.doesNotMatch(raw, /ZCODE_JSONL_PRIVATE|ZCODE_ROLLOUT_DECOY|ZCODE_ABANDONED_V2/)
 })
