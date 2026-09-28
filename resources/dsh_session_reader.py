@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extend Grok's foreign-session reader with inert Grok and Pi adapters."""
+"""Extend Grok's foreign-session reader with inert Grok, Pi, and ZCode adapters."""
 
 from __future__ import annotations
 
@@ -7,9 +7,13 @@ import argparse
 import json
 import os
 import re
+import shutil
+import sqlite3
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 from urllib.parse import quote
 
 import session_reader as core
@@ -21,7 +25,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 
-EXTENDED_TOOLS = ("grok", "pi")
+EXTENDED_TOOLS = ("grok", "pi", "zcode")
 TOOLS = (*core.TOOLS, *EXTENDED_TOOLS)
 
 
@@ -124,6 +128,10 @@ def _append_text_turn(
 
 class ProviderAdapter:
     tool: str
+    warnings: list[dict[str, str]]
+
+    def __init__(self) -> None:
+        self.warnings = []
 
     def discover(self, cwd: str, within_min: int) -> list[dict[str, Any]]:
         raise NotImplementedError
@@ -956,9 +964,785 @@ class PiAdapter(ProviderAdapter):
         return core._finalize_result(result)
 
 
+_ZCODE_REQUIRED_COLUMNS = {
+    "session": ("id", "directory", "time_created", "time_updated"),
+    "message": ("id", "session_id", "data"),
+    "part": ("message_id", "data"),
+}
+_ZCODE_SESSION_OPTIONAL = ("title", "task_type", "parent_id", "data", "slug", "version")
+_ZCODE_HIDDEN_PARTS = {"reasoning", "thinking", "redacted_reasoning", "redacted-thinking"}
+_ZCODE_STRUCTURAL_PARTS = {"step-start", "step-finish", "step-end"}
+_ZCODE_JSONL_FALLBACK_WARNING = (
+    "ZCode sqlite store was absent; used best-effort JSONL under projects/. "
+    "The primary store is cli/db/db.sqlite. Abandoned v2/sessions and cli/rollout JSONL are not read."
+)
+
+
+def _parse_data_object(raw: Any) -> dict[str, Any] | None:
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    if isinstance(raw, str):
+        if not raw.strip():
+            return None
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(raw, dict):
+        return raw
+    return None
+
+
+def _row_value(row: sqlite3.Row, name: str) -> Any:
+    return row[name] if name in row.keys() else None
+
+
+def _is_abandoned_zcode_path(path: Path) -> bool:
+    parts = [part.casefold() for part in path.expanduser().parts]
+    for index, part in enumerate(parts):
+        if part == "v2" and index + 1 < len(parts) and parts[index + 1] == "sessions":
+            return True
+        if part == "cli" and index + 1 < len(parts) and parts[index + 1] == "rollout":
+            return True
+    return False
+
+
+def _connect_sqlite_snapshot(path: Path) -> tuple[sqlite3.Connection, tempfile.TemporaryDirectory[str] | None]:
+    """Open a private snapshot so a live WAL writer cannot wedge this process."""
+    if not path.is_file() or path.is_symlink():
+        raise core.ReaderError(f"ZCode sqlite store is missing: {path}")
+    temp = tempfile.TemporaryDirectory(prefix="dsh-zcode-")
+    snapshot = Path(temp.name) / "db.sqlite"
+    uri = path.resolve().as_uri()
+    try:
+        source = sqlite3.connect(f"{uri}?mode=ro", uri=True, timeout=1.0)
+        try:
+            source.execute("PRAGMA query_only = ON")
+            source.execute("PRAGMA busy_timeout = 1000")
+            dest = sqlite3.connect(snapshot)
+            try:
+                source.backup(dest)
+            finally:
+                dest.close()
+        finally:
+            source.close()
+        database = sqlite3.connect(f"{snapshot.resolve().as_uri()}?mode=ro", uri=True)
+    except (OSError, sqlite3.Error):
+        try:
+            shutil.copy2(path, snapshot)
+            for suffix in ("-wal", "-shm"):
+                sibling = Path(f"{path}{suffix}")
+                if sibling.is_file() and not sibling.is_symlink():
+                    shutil.copy2(sibling, Path(f"{snapshot}{suffix}"))
+            database = sqlite3.connect(f"{snapshot.resolve().as_uri()}?mode=ro", uri=True)
+        except (OSError, sqlite3.Error):
+            temp.cleanup()
+            temp = None
+            try:
+                database = sqlite3.connect(f"{uri}?mode=ro&immutable=1", uri=True, timeout=1.0)
+            except (OSError, sqlite3.Error) as exc:
+                raise core.ReaderError(f"failed to open ZCode sqlite store {path}: {exc}") from exc
+    database.row_factory = sqlite3.Row
+    try:
+        database.execute("PRAGMA query_only = ON")
+        database.execute("PRAGMA busy_timeout = 1000")
+    except sqlite3.Error as exc:
+        database.close()
+        if temp is not None:
+            temp.cleanup()
+        raise core.ReaderError(f"failed to open ZCode sqlite store {path}: {exc}") from exc
+    return database, temp
+
+
+@contextmanager
+def _zcode_database(path: Path) -> Iterator[sqlite3.Connection]:
+    database, temp = _connect_sqlite_snapshot(path)
+    try:
+        yield database
+    finally:
+        database.close()
+        if temp is not None:
+            temp.cleanup()
+
+
+def _sqlite_tables(database: sqlite3.Connection) -> set[str]:
+    rows = database.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def _sqlite_columns(database: sqlite3.Connection, table: str) -> set[str]:
+    rows = database.execute(f'PRAGMA table_info("{table}")').fetchall()
+    return {str(row[1]) for row in rows}
+
+
+def _require_zcode_schema(
+    database: sqlite3.Connection,
+    path: Path,
+) -> tuple[dict[str, set[str]], list[dict[str, str]]]:
+    warnings: list[dict[str, str]] = []
+    tables = _sqlite_tables(database)
+    missing_tables = [name for name in ("session", "message", "part") if name not in tables]
+    if missing_tables:
+        raise core.ReaderError(
+            f"ZCode database {path} is missing required table(s): {', '.join(missing_tables)}"
+        )
+    columns: dict[str, set[str]] = {}
+    for table, required in _ZCODE_REQUIRED_COLUMNS.items():
+        present = _sqlite_columns(database, table)
+        missing = [name for name in required if name not in present]
+        if missing:
+            raise core.ReaderError(
+                f"ZCode table {table} in {path} is missing required column(s): {', '.join(missing)}"
+            )
+        columns[table] = present
+    if "task_type" not in columns["session"]:
+        core._add_warning(
+            warnings,
+            "task_type_unavailable",
+            "ZCode session table has no task_type column; subagent_child sessions could not be filtered.",
+        )
+    return columns, warnings
+
+
+def _selected_columns(present: set[str], required: Iterable[str], optional: Iterable[str]) -> list[str]:
+    names = [name for name in required if name in present]
+    names.extend(name for name in optional if name in present and name not in names)
+    return names
+
+
+def _session_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return _parse_data_object(_row_value(row, "data")) or {}
+
+
+def _session_text(row: sqlite3.Row, payload: dict[str, Any], name: str, *aliases: str) -> str | None:
+    value = _row_value(row, name)
+    if isinstance(value, str) and value.strip():
+        return value
+    for key in (name, *aliases):
+        candidate = payload.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return None
+
+
+def _zcode_tool_part(
+    payload: dict[str, Any],
+    max_tool_chars: int,
+    index: int,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
+    call_id = (
+        payload.get("callID")
+        or payload.get("callId")
+        or payload.get("toolCallId")
+        or payload.get("id")
+        or f"zcode-call-{index}"
+    )
+    name = payload.get("tool") or payload.get("name") or state.get("tool") or "zcode_tool"
+    raw_input = state.get("input") if "input" in state else payload.get("input", {})
+    call = {
+        "id": core._safe_text(call_id),
+        "name": core._safe_text(name),
+        "input": core._json_preview(raw_input, max_tool_chars),
+        "inert": True,
+    }
+    status = state.get("status")
+    has_output = "output" in state or "error" in state
+    if status in {None, "pending", "running"} and not has_output:
+        return call, None
+    is_error = status in {"error", "failed"}
+    if is_error and state.get("error") not in (None, ""):
+        output: Any = state.get("error")
+    elif "output" in state:
+        output = state.get("output")
+    elif "error" in state:
+        output = state.get("error")
+        is_error = True
+    else:
+        output = ""
+    content = _bounded_text(output, max_tool_chars) if isinstance(output, str) else core._json_preview(output, max_tool_chars)
+    return call, {
+        "tool_use_id": core._safe_text(call_id),
+        "content": content,
+        "is_error": is_error,
+        "unavailable": False,
+        "inert": True,
+    }
+
+
+def _compaction_summary(payload: dict[str, Any]) -> str:
+    for key in ("summary", "text", "content"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return core._safe_text(value)
+    details: list[str] = []
+    tail = payload.get("tail_start_id") or payload.get("tailStartId")
+    summary_id = payload.get("summaryMessageId") or payload.get("summary_message_id")
+    if isinstance(tail, str) and tail:
+        details.append(f"tail {tail}")
+    if isinstance(summary_id, str) and summary_id:
+        details.append(f"summary message {summary_id}")
+    if isinstance(payload.get("compactBoundary"), dict):
+        details.append("compact boundary present")
+    detail = "; ".join(details) if details else "boundary present"
+    return f"ZCode context was compacted ({detail}). Older rows still in the database were kept."
+
+
+def _message_model(payload: dict[str, Any]) -> str | None:
+    for key in ("modelID", "modelId"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    model = payload.get("model")
+    if isinstance(model, str) and model.strip():
+        return model
+    if isinstance(model, dict):
+        for key in ("modelID", "modelId", "id"):
+            value = model.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    return None
+
+
+def _assemble_zcode_turns(
+    messages: list[tuple[str, dict[str, Any], list[dict[str, Any]]]],
+    max_tool_chars: int,
+    warnings: list[dict[str, str]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None, int]:
+    """Build inert turns. Compaction markers never drop rows that still exist."""
+    turns: list[dict[str, Any]] = []
+    summaries: list[dict[str, Any]] = []
+    hidden = 0
+    unknown = 0
+    malformed = 0
+    compactions = 0
+    model: str | None = None
+    for message_index, (role, payload, parts) in enumerate(messages):
+        if role == "assistant":
+            found = _message_model(payload)
+            if found:
+                model = found
+        texts: list[str] = []
+        calls: list[dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
+        for part_index, part in enumerate(parts):
+            part_type = part.get("type")
+            if part_type == "text":
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    texts.append(core._safe_text(text))
+                continue
+            if part_type in _ZCODE_HIDDEN_PARTS:
+                hidden += 1
+                continue
+            if part_type == "tool":
+                call, result = _zcode_tool_part(part, max_tool_chars, message_index * 1000 + part_index)
+                calls.append(call)
+                if result is not None:
+                    results.append(result)
+                continue
+            if part_type == "compaction":
+                compactions += 1
+                summaries.append(
+                    {
+                        "kind": "compaction",
+                        "content": _compaction_summary(part),
+                        "inert": True,
+                    }
+                )
+                continue
+            if part_type in _ZCODE_STRUCTURAL_PARTS:
+                continue
+            unknown += 1
+        text = "\n".join(texts)
+        if text or calls:
+            turns.append(core._turn(role, text=text, tool_calls=calls))
+        if results:
+            turns.append(core._turn("tool", tool_results=results))
+    if malformed:
+        core._add_warning(
+            warnings,
+            "malformed_records_skipped",
+            f"Skipped {malformed} malformed ZCode record(s).",
+        )
+    if hidden:
+        core._add_warning(
+            warnings,
+            "hidden_reasoning_skipped",
+            f"Excluded {hidden} ZCode reasoning or thinking part(s).",
+        )
+    if compactions:
+        core._add_warning(
+            warnings,
+            "compaction_summary",
+            (
+                f"Surfaced {compactions} ZCode compaction marker(s) as summary markers. "
+                "Older rows still present in the database were kept."
+            ),
+        )
+    if unknown:
+        core._add_warning(
+            warnings,
+            "unknown_records_skipped",
+            f"Skipped {unknown} unsupported ZCode part(s).",
+        )
+    return turns, summaries, model, malformed
+
+
+class ZCodeAdapter(ProviderAdapter):
+    """Read ZCode's OpenCode-like sqlite store as inert history.
+
+    Primary store: ``$ZCODE_HOME/cli/db/db.sqlite`` or ``~/.zcode/cli/db/db.sqlite``.
+    ``session.directory`` scopes discovery to the current cwd. ``task_type ==
+    subagent_child`` is omitted from discovery; an explicit native id can still
+    be read. Abandoned ``v2/sessions`` and ``cli/rollout`` JSONL are never a
+    source. ``projects/**/*.jsonl`` is a warned best-effort fallback only when
+    the sqlite file is absent.
+    """
+
+    tool = "zcode"
+
+    @staticmethod
+    def _home() -> Path:
+        configured = os.environ.get("ZCODE_HOME")
+        return Path(configured).expanduser() if configured else Path.home() / ".zcode"
+
+    @classmethod
+    def _database_path(cls) -> Path:
+        return cls._home() / "cli" / "db" / "db.sqlite"
+
+    @classmethod
+    def _projects_root(cls) -> Path:
+        return cls._home() / "projects"
+
+    def _candidate(
+        self,
+        *,
+        session_id: str,
+        path: Path,
+        title: str | None,
+        cwd: str | None,
+        created_ms: int | None,
+        updated_ms: int,
+        task_type: str | None,
+        parent_id: str | None,
+        store: str,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        source = "zcode" if store == "sqlite" else "zcode-projects-jsonl"
+        return {
+            "tool": "zcode",
+            "source": source,
+            "store": store,
+            "session_id": core._safe_text(session_id),
+            "path": str(path),
+            "title": core._safe_text(title) if title else None,
+            "cwd": core._safe_text(cwd) if cwd else None,
+            "branch": None,
+            "created_at": core._iso_from_millis(created_ms),
+            "updated_at_ms": updated_ms,
+            "updated_at": core._iso_from_millis(updated_ms),
+            "source_repo_root_path": None,
+            "model": core._safe_text(model) if model else None,
+            "task_type": core._safe_text(task_type) if task_type else None,
+            "parent_session": core._safe_text(parent_id) if parent_id else None,
+        }
+
+    def _sqlite_candidates(
+        self,
+        database: sqlite3.Connection,
+        path: Path,
+        columns: dict[str, set[str]],
+        *,
+        include_subagents: bool,
+    ) -> list[dict[str, Any]]:
+        selected = _selected_columns(
+            columns["session"],
+            _ZCODE_REQUIRED_COLUMNS["session"],
+            _ZCODE_SESSION_OPTIONAL,
+        )
+        rows = database.execute(
+            f"SELECT {', '.join(selected)} FROM session ORDER BY time_updated, id"
+        ).fetchall()
+        sessions: list[dict[str, Any]] = []
+        for row in rows:
+            payload = _session_payload(row)
+            task_type = _session_text(row, payload, "task_type", "taskType")
+            if not include_subagents and task_type == "subagent_child":
+                continue
+            session_id = _row_value(row, "id")
+            directory = _session_text(row, payload, "directory", "cwd", "workspace")
+            if not isinstance(session_id, str) or not session_id:
+                continue
+            created_ms = core._timestamp_to_millis(_row_value(row, "time_created"))
+            updated_ms = core._timestamp_to_millis(_row_value(row, "time_updated")) or created_ms or 0
+            sessions.append(
+                self._candidate(
+                    session_id=session_id,
+                    path=path,
+                    title=_session_text(row, payload, "title"),
+                    cwd=directory,
+                    created_ms=created_ms,
+                    updated_ms=updated_ms,
+                    task_type=task_type,
+                    parent_id=_session_text(row, payload, "parent_id", "parentId"),
+                    store="sqlite",
+                )
+            )
+        return sessions
+
+    def _iter_project_jsonl(self) -> Iterable[Path]:
+        root = self._projects_root()
+        if not root.is_dir() or root.is_symlink():
+            return
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            try:
+                children = sorted(current.iterdir(), key=lambda item: item.name)
+            except OSError:
+                continue
+            for child in children:
+                if child.is_symlink() or _is_abandoned_zcode_path(child):
+                    continue
+                if child.is_dir():
+                    if len(child.relative_to(root).parts) <= 3:
+                        stack.append(child)
+                    continue
+                if child.is_file() and child.suffix == ".jsonl":
+                    yield child
+
+    def _jsonl_file_candidates(
+        self,
+        path: Path,
+        cwd: str,
+        *,
+        require_cwd: bool,
+    ) -> list[dict[str, Any]]:
+        records, _malformed = core._read_plain_jsonl(path)
+        groups: dict[str, list[dict[str, Any]]] = {}
+        order: list[str] = []
+        for record in records:
+            session_id = record.get("sessionId") or record.get("session_id")
+            if record.get("type") == "session" and isinstance(record.get("id"), str):
+                session_id = record["id"]
+            if not isinstance(session_id, str) or not session_id.strip():
+                session_id = path.stem
+            if session_id not in groups:
+                groups[session_id] = []
+                order.append(session_id)
+            groups[session_id].append(record)
+        candidates: list[dict[str, Any]] = []
+        for session_id in order:
+            group = groups[session_id]
+            actual_cwd = next(
+                (
+                    value
+                    for record in group
+                    for value in (record.get("cwd"), record.get("directory"))
+                    if isinstance(value, str) and value.strip()
+                ),
+                None,
+            )
+            if require_cwd and not _same_cwd(actual_cwd, cwd):
+                continue
+            if not any(record.get("role") in {"user", "assistant"} for record in group):
+                continue
+            title = next(
+                (
+                    record.get("title")
+                    for record in group
+                    if isinstance(record.get("title"), str) and record["title"].strip()
+                ),
+                None,
+            )
+            timestamps = [
+                core._timestamp_to_millis(record.get("timestamp") or record.get("time"))
+                for record in group
+            ]
+            valid = [value for value in timestamps if value is not None]
+            updated_ms = valid[-1] if valid else core._mtime_millis(path)
+            candidates.append(
+                self._candidate(
+                    session_id=session_id,
+                    path=path,
+                    title=title if isinstance(title, str) else None,
+                    cwd=actual_cwd,
+                    created_ms=valid[0] if valid else None,
+                    updated_ms=updated_ms,
+                    task_type=None,
+                    parent_id=None,
+                    store="projects-jsonl",
+                )
+            )
+        return candidates
+
+    def _discover_sqlite(self, path: Path, cwd: str, within_min: int) -> list[dict[str, Any]]:
+        with _zcode_database(path) as database:
+            columns, warnings = _require_zcode_schema(database, path)
+            self.warnings.extend(warnings)
+            sessions = [
+                candidate
+                for candidate in self._sqlite_candidates(
+                    database,
+                    path,
+                    columns,
+                    include_subagents=False,
+                )
+                if _same_cwd(candidate.get("cwd"), cwd)
+                and core._within(int(candidate.get("updated_at_ms") or 0), within_min)
+            ]
+        return core._sort_and_dedupe(sessions)
+
+    def _discover_jsonl(self, cwd: str, within_min: int) -> list[dict[str, Any]]:
+        sessions: list[dict[str, Any]] = []
+        saw_file = False
+        for path in self._iter_project_jsonl():
+            saw_file = True
+            try:
+                found = self._jsonl_file_candidates(path, cwd, require_cwd=True)
+            except core.ReaderError as exc:
+                core._add_warning(
+                    self.warnings,
+                    "jsonl_fallback",
+                    f"Skipped unreadable ZCode projects JSONL {path}: {exc}",
+                )
+                continue
+            for candidate in found:
+                if core._within(int(candidate.get("updated_at_ms") or 0), within_min):
+                    sessions.append(candidate)
+        if saw_file:
+            core._add_warning(self.warnings, "jsonl_fallback", _ZCODE_JSONL_FALLBACK_WARNING)
+        return core._sort_and_dedupe(sessions)
+
+    def discover(self, cwd: str, within_min: int) -> list[dict[str, Any]]:
+        self.warnings = []
+        path = self._database_path()
+        if path.is_symlink():
+            core._add_warning(
+                self.warnings,
+                "sqlite_store_skipped",
+                f"ZCode sqlite path is a symlink and was not followed: {path}",
+            )
+        elif path.is_file():
+            return self._discover_sqlite(path, cwd, within_min)
+        return self._discover_jsonl(cwd, within_min)
+
+    def candidate_from_path(self, raw_path: str, cwd: str) -> dict[str, Any] | None:
+        path = Path(raw_path).expanduser()
+        if _is_abandoned_zcode_path(path):
+            return None
+        if not path.is_file() or path.is_symlink() or path.suffix != ".jsonl":
+            return None
+        try:
+            found = self._jsonl_file_candidates(path, cwd, require_cwd=False)
+        except core.ReaderError:
+            return None
+        if len(found) == 1:
+            return found[0]
+        if len(found) > 1:
+            raise core.AmbiguousReference(raw_path, found)
+        return None
+
+    def find_id(self, session_id: str, cwd: str) -> dict[str, Any] | None:
+        path = self._database_path()
+        if path.is_file() and not path.is_symlink():
+            with _zcode_database(path) as database:
+                columns, _warnings = _require_zcode_schema(database, path)
+                matches = [
+                    candidate
+                    for candidate in self._sqlite_candidates(
+                        database,
+                        path,
+                        columns,
+                        include_subagents=True,
+                    )
+                    if str(candidate.get("session_id", "")).casefold() == session_id.casefold()
+                ]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                raise core.AmbiguousReference(session_id, matches)
+            return None
+        matches = [
+            candidate
+            for candidate in self._discover_jsonl(cwd, 0)
+            if str(candidate.get("session_id", "")).casefold() == session_id.casefold()
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise core.AmbiguousReference(session_id, matches)
+        return None
+
+    def _load_sqlite_parts(
+        self,
+        database: sqlite3.Connection,
+        columns: dict[str, set[str]],
+        session_id: str,
+    ) -> tuple[list[tuple[str, dict[str, Any], list[dict[str, Any]]]], int]:
+        message_cols = _selected_columns(columns["message"], ("id", "session_id", "data"), ("time_created",))
+        message_order = "time_created, id" if "time_created" in columns["message"] else "rowid"
+        message_rows = database.execute(
+            f"SELECT {', '.join(message_cols)} FROM message WHERE session_id = ? ORDER BY {message_order}",
+            (session_id,),
+        ).fetchall()
+        part_optional = ("id", "session_id", "time_created")
+        part_cols = _selected_columns(columns["part"], ("message_id", "data"), part_optional)
+        part_order = "time_created, rowid" if "time_created" in columns["part"] else "rowid"
+        if "session_id" in columns["part"]:
+            part_rows = database.execute(
+                f"SELECT {', '.join(part_cols)} FROM part WHERE session_id = ? ORDER BY {part_order}",
+                (session_id,),
+            ).fetchall()
+        else:
+            part_rows = database.execute(
+                f"SELECT {', '.join(part_cols)} FROM part WHERE message_id IN "
+                "(SELECT id FROM message WHERE session_id = ?) "
+                f"ORDER BY {part_order}",
+                (session_id,),
+            ).fetchall()
+        parts_by_message: dict[str, list[dict[str, Any]]] = {}
+        malformed = 0
+        for row in part_rows:
+            message_id = _row_value(row, "message_id")
+            payload = _parse_data_object(_row_value(row, "data"))
+            if not isinstance(message_id, str) or payload is None:
+                malformed += 1
+                continue
+            parts_by_message.setdefault(message_id, []).append(payload)
+        messages: list[tuple[str, dict[str, Any], list[dict[str, Any]]]] = []
+        for row in message_rows:
+            message_id = _row_value(row, "id")
+            payload = _parse_data_object(_row_value(row, "data"))
+            if not isinstance(message_id, str) or payload is None:
+                malformed += 1
+                continue
+            role = payload.get("role")
+            if role not in {"user", "assistant"}:
+                malformed += 1
+                continue
+            messages.append((role, payload, parts_by_message.get(message_id, [])))
+        return messages, malformed
+
+    def _read_sqlite(self, candidate: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
+        path = Path(str(candidate["path"]))
+        session_id = str(candidate.get("session_id") or "")
+        with _zcode_database(path) as database:
+            columns, schema_warnings = _require_zcode_schema(database, path)
+            messages, malformed = self._load_sqlite_parts(database, columns, session_id)
+        warnings = list(schema_warnings)
+        if malformed:
+            core._add_warning(
+                warnings,
+                "malformed_records_skipped",
+                f"Skipped {malformed} malformed ZCode message or part row(s).",
+            )
+        turns, summaries, model, _ignored = _assemble_zcode_turns(messages, max_tool_chars, warnings)
+        if not candidate.get("title"):
+            title = next(
+                (
+                    core._one_line(turn.get("text"), 120)
+                    for turn in turns
+                    if turn.get("role") == "user" and turn.get("text")
+                ),
+                None,
+            )
+        else:
+            title = candidate.get("title")
+        result = {
+            "tool": "zcode",
+            "source": "zcode",
+            "session_id": session_id,
+            "path": str(path),
+            "title": title,
+            "cwd": candidate.get("cwd"),
+            "branch": None,
+            "created_at": candidate.get("created_at"),
+            "updated_at": candidate.get("updated_at"),
+            "source_repo_root_path": None,
+            "model": model or candidate.get("model"),
+            "task_type": candidate.get("task_type"),
+            "parent_session": candidate.get("parent_session"),
+            "turns": turns,
+            "summaries": summaries,
+            "warnings": warnings,
+        }
+        return core._finalize_result(result)
+
+    def _read_jsonl(self, candidate: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
+        path = Path(str(candidate["path"]))
+        records, malformed = core._read_plain_jsonl(path)
+        wanted = str(candidate.get("session_id") or "")
+        messages: list[tuple[str, dict[str, Any], list[dict[str, Any]]]] = []
+        model: str | None = None
+        for record in records:
+            session_id = record.get("sessionId") or record.get("session_id") or path.stem
+            if record.get("type") == "session":
+                header_id = record.get("id")
+                if isinstance(header_id, str):
+                    session_id = header_id
+            if str(session_id).casefold() != wanted.casefold():
+                continue
+            if record.get("type") == "session":
+                continue
+            role = record.get("role")
+            if role not in {"user", "assistant"}:
+                continue
+            content = record.get("content", record.get("text"))
+            parts: list[dict[str, Any]] = []
+            if isinstance(content, str):
+                parts.append({"type": "text", "text": content})
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        parts.append(block)
+            elif content is not None:
+                parts.append({"type": "text", "text": core._safe_text(content)})
+            found = _message_model(record)
+            payload = {"role": role}
+            if found:
+                payload["modelID"] = found
+                model = found
+            messages.append((role, payload, parts))
+        warnings: list[dict[str, str]] = []
+        core._add_warning(warnings, "jsonl_fallback", _ZCODE_JSONL_FALLBACK_WARNING)
+        if malformed:
+            core._add_warning(
+                warnings,
+                "malformed_records_skipped",
+                f"Skipped {malformed} malformed ZCode JSONL record(s).",
+            )
+        turns, summaries, assembled_model, _ignored = _assemble_zcode_turns(messages, max_tool_chars, warnings)
+        result = {
+            "tool": "zcode",
+            "source": "zcode-projects-jsonl",
+            "session_id": wanted,
+            "path": str(path),
+            "title": candidate.get("title"),
+            "cwd": candidate.get("cwd"),
+            "branch": None,
+            "created_at": candidate.get("created_at"),
+            "updated_at": candidate.get("updated_at"),
+            "source_repo_root_path": None,
+            "model": assembled_model or model,
+            "task_type": None,
+            "turns": turns,
+            "summaries": summaries,
+            "warnings": warnings,
+        }
+        return core._finalize_result(result)
+
+    def read(self, candidate: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
+        if candidate.get("store") == "projects-jsonl":
+            return self._read_jsonl(candidate, max_tool_chars)
+        return self._read_sqlite(candidate, max_tool_chars)
+
+
 ADAPTERS: dict[str, ProviderAdapter] = {
     "grok": GrokAdapter(),
     "pi": PiAdapter(),
+    "zcode": ZCodeAdapter(),
 }
 
 
@@ -1070,7 +1854,7 @@ def main(argv: list[str] | None = None) -> int:
                             "tool": args.tool,
                             "cwd": args.cwd,
                             "sessions": sessions,
-                            "warnings": [],
+                            "warnings": list(adapter.warnings),
                         },
                         indent=2,
                         ensure_ascii=True,

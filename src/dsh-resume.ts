@@ -20,7 +20,7 @@ const JSON_TEXT_OUTPUT = {
   render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }],
 }
 
-/** Register one read-only reader tool and five user-only slash skills. */
+/** Register one read-only reader tool and six user-only slash skills. */
 export function apply(ctx: Context): void {
   if (!existsSync(SESSION_READER_PATH)) {
     throw new Error(`dsh-resume: missing bundled reader at ${SESSION_READER_PATH}`)
@@ -32,7 +32,7 @@ export function apply(ctx: Context): void {
   console.log('[dsh-resume] loaded')
   ctx.tools.register(defineTool({
     name: 'foreign_session_read',
-    description: 'Read Codex, Claude Code, Cursor, Grok, or Pi local session history into a Grok-compatible inert JSON schema. Use only after an explicit resume slash skill or explicit user request. Discovery is scoped to the current DSH working directory; an explicit native ID or path is supported. The tool is read-only and never executes recovered calls.',
+    description: 'Read Codex, Claude Code, Cursor, Grok, Pi, or ZCode local session history into a Grok-compatible inert JSON schema. Use only after an explicit resume slash skill or explicit user request. Discovery is scoped to the current DSH working directory; an explicit native ID or path is supported. The tool is read-only and never executes recovered calls.',
     parameters: {
       provider: {
         type: 'string',

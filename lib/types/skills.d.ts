@@ -37,8 +37,14 @@ export declare const RESUME_SKILL_SPECS: readonly [{
     readonly product: "Pi";
     readonly description: "继续当前工作目录中的 Pi 会话；可附会话 ID、JSONL 路径或标题关键词。";
     readonly recoveryBoundary: "The reader follows Pi's current active leaf only and excludes thinking, hooks, system messages, and extension-injected records.";
+}, {
+    readonly name: "resume-zcode";
+    readonly provider: "zcode";
+    readonly product: "ZCode";
+    readonly description: "继续当前工作目录中的 ZCode 会话；可附会话 ID、记录路径或标题关键词。";
+    readonly recoveryBoundary: "The reader uses the ZCode sqlite store at cli/db/db.sqlite and does not replay calls or revive the CLI. Abandoned v2 sessions and cli/rollout JSONL are ignored. Projects JSONL is a warned fallback only when sqlite is absent. Compaction is a summary marker; older rows still stored are kept.";
 }];
-/** One source of truth for all five user-only slash skills. */
+/** One source of truth for all six user-only slash skills. */
 export declare function skillRegistration(spec: ResumeSkillSpec): SkillRegistration;
 export declare function resumeSkillContent(spec: ResumeSkillSpec): string;
 //# sourceMappingURL=skills.d.ts.map
