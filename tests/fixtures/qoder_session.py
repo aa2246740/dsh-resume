@@ -98,14 +98,35 @@ def build(home: Path, cwd: Path, other_cwd: Path, ide_root: Path | None) -> Path
             WIDGET_ID, "widget-config", None, "2026-08-20T04:00:00.000Z", str(cwd),
             "runtime-config", None,
         ),
+        _record(
+            WIDGET_ID, "widget-wsdirs", None, "2026-08-20T04:00:00.500Z", str(cwd),
+            "workspace-directories", None, directories=[str(cwd)],
+        ),
         _user(WIDGET_ID, "widget-user", None, "2026-08-20T04:00:01.000Z", str(cwd), "Continue the Qoder fixture."),
+        # qodercli interleaves injected-context attachments inside the
+        # parentUuid chain: assistant-1's parent is the second attachment,
+        # not the user prompt.
+        _record(
+            WIDGET_ID, "widget-attachment-1", "widget-user", "2026-08-20T04:00:01.500Z", str(cwd),
+            "attachment", None,
+            attachment={"type": "skill_listing", "content": "QODER_INJECTED_CONTEXT"},
+        ),
+        _record(
+            WIDGET_ID, "widget-attachment-2", "widget-attachment-1", "2026-08-20T04:00:01.600Z", str(cwd),
+            "attachment", None,
+            attachment={"type": "agent_listing_delta", "content": "QODER_INJECTED_CONTEXT"},
+        ),
         _assistant(
-            WIDGET_ID, "widget-assistant-1", "widget-user", "2026-08-20T04:00:02.000Z", str(cwd),
+            WIDGET_ID, "widget-assistant-1", "widget-attachment-2", "2026-08-20T04:00:02.000Z", str(cwd),
             [
                 {"type": "thinking", "thinking": "QODER_PRIVATE_THINKING"},
                 {"type": "text", "text": "Prepared the Qoder change."},
                 {"type": "tool_use", "id": "qoder-call-1", "name": "Bash", "input": {"command": "pnpm test"}},
             ],
+        ),
+        _record(
+            WIDGET_ID, None, None, "2026-08-20T04:00:02.500Z", str(cwd),
+            "active-leaf", None, leafUuid="widget-assistant-1", explicit=False,
         ),
         _tool_results(
             WIDGET_ID, "widget-result", "widget-assistant-1", "2026-08-20T04:00:03.000Z", str(cwd),
@@ -119,6 +140,10 @@ def build(home: Path, cwd: Path, other_cwd: Path, ide_root: Path | None) -> Path
         _assistant(
             WIDGET_ID, "widget-assistant-2", "widget-result", "2026-08-20T04:00:05.000Z", str(cwd),
             [{"type": "text", "text": "Stopped after the Qoder focused test."}],
+        ),
+        _record(
+            WIDGET_ID, None, None, "2026-08-20T04:00:05.500Z", str(cwd),
+            "active-leaf", None, leafUuid="widget-assistant-2", explicit=False,
         ),
         _record(
             WIDGET_ID, "widget-snapshot", "widget-assistant-2", "2026-08-20T04:00:06.000Z", str(cwd),

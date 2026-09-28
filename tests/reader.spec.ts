@@ -841,7 +841,7 @@ test('Qoder discovery scopes to cwd and keeps transcript turns inert', async (t)
   assert.ok(result.turns.some(turn => turn.tool_calls?.some(call => call.name === 'Bash' && call.inert === true)))
   assert.ok(result.turns.some(turn => turn.tool_results?.some(output => output.content.includes('qoder focused tests passed') && output.inert === true)))
   assert.ok(result.warnings.some(warning => warning.code === 'sidechain_records_skipped'))
-  assert.doesNotMatch(raw, /QODER_PRIVATE_THINKING|QODER_SIDECHAIN|QODER_OTHER_WORKSPACE|QODER_STATE_DECOY|QODER_COMPACTION_DECOY/)
+  assert.doesNotMatch(raw, /QODER_PRIVATE_THINKING|QODER_SIDECHAIN|QODER_OTHER_WORKSPACE|QODER_STATE_DECOY|QODER_COMPACTION_DECOY|QODER_INJECTED_CONTEXT/)
 })
 
 test('Qoder reference resolution handles ambiguity and title matches', async (t) => {
