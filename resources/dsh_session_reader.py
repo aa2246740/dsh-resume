@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extend Grok's foreign-session reader with inert Grok, Pi, and ZCode adapters."""
+"""Extend Grok's foreign-session reader with inert Grok, Pi, ZCode, and WorkBuddy adapters."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 
-EXTENDED_TOOLS = ("grok", "pi", "zcode")
+EXTENDED_TOOLS = ("grok", "pi", "zcode", "workbuddy")
 TOOLS = (*core.TOOLS, *EXTENDED_TOOLS)
 
 
@@ -1739,10 +1739,605 @@ class ZCodeAdapter(ProviderAdapter):
         return self._read_sqlite(candidate, max_tool_chars)
 
 
+_WORKBUDDY_CUSTOM_ITEM_TYPES = {
+    "custom-title",
+    "ai-title",
+    "file-history-snapshot",
+    "summary",
+    "topic",
+    "goal-result",
+    "goal-progress",
+    "resend-fork-notice",
+}
+
+_WORKBUDDY_USER_QUERY_RE = re.compile(r"<user_query>([\s\S]*?)</user_query>")
+_WORKBUDDY_SYSTEM_TAG_RES = [
+    re.compile(rf"<{tag}\b[^>]*>[\s\S]*?</{tag}>\s*")
+    for tag in (
+        "system-reminder",
+        "additional_data",
+        "user_info",
+        "cb_summary",
+        "rules",
+        "content_policy",
+        "agent_skills",
+        "always_applied_workspace_rules",
+        "agent_requestable_workspace_rules",
+        "project_context",
+        "communication",
+        "tool_calling",
+        "making_code_changes",
+        "response_language",
+        "git_status",
+    )
+]
+_WORKBUDDY_TEAMMATE_RE = re.compile(
+    r"^\s*<teammate-message\b[^>]*>[\s\S]*</teammate-message>\s*$",
+    re.IGNORECASE,
+)
+
+
+def _workbuddy_int32(value: int) -> int:
+    value &= 0xFFFFFFFF
+    return value - 0x100000000 if value >= 0x80000000 else value
+
+
+def _workbuddy_djb2_base36(value: str) -> str:
+    """WorkBuddy's djb2 over UTF-8 bytes rendered as base36."""
+    state = 5381
+    for byte in value.encode("utf-8"):
+        state = _workbuddy_int32(state * 33) ^ byte
+    state &= 0xFFFFFFFF
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    if state == 0:
+        return "0"
+    output = ""
+    while state:
+        state, remainder = divmod(state, 36)
+        output = digits[remainder] + output
+    return output
+
+
+def _workbuddy_truncate_utf8(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _workbuddy_project_slug(value: str) -> str:
+    """compressWorkspacePathName: / \\ : -> -, trim, collapse, hash long paths."""
+    base = re.sub(r"[/\\:]", "-", value)
+    base = re.sub(r"-+", "-", base.strip("-"))
+    if len(base.encode("utf-8")) <= 255:
+        return base
+    return f"{_workbuddy_truncate_utf8(base, 180)}-{_workbuddy_djb2_base36(base)}"
+
+
+def _workbuddy_teammate(item: dict[str, Any]) -> bool:
+    provider = item.get("providerData")
+    if isinstance(provider, dict):
+        teammate = provider.get("teammateMessage")
+        if isinstance(teammate, dict) and isinstance(teammate.get("from"), str):
+            return True
+    text = _workbuddy_content_text(item.get("content"))
+    return bool(text and _WORKBUDDY_TEAMMATE_RE.match(text))
+
+
+def _workbuddy_meta_record(item: dict[str, Any]) -> bool:
+    """Records the WorkBuddy app never shows as real user/assistant turns."""
+    provider = item.get("providerData")
+    provider = provider if isinstance(provider, dict) else {}
+    if (
+        provider.get("isMeta") is True
+        or provider.get("isCompactInternal") is True
+        or isinstance(provider.get("compactType"), str)
+        or _workbuddy_teammate(item)
+    ):
+        return True
+    if item.get("role") == "user":
+        if provider.get("skipRun") is True:
+            return True
+        client_meta = provider.get("clientMeta")
+        codebuddy = (
+            client_meta.get("codebuddy.ai")
+            if isinstance(client_meta, dict) and isinstance(client_meta.get("codebuddy.ai"), dict)
+            else {}
+        )
+        if codebuddy.get("queueOrigin") == "steer":
+            return True
+    return False
+
+
+def _workbuddy_content_text(content: Any) -> str:
+    parts: list[str] = []
+    for block in core._blocks(content):
+        text = block.get("text")
+        if isinstance(text, str):
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def _workbuddy_strip_system_tags(text: str) -> str:
+    stripped = text
+    for pattern in _WORKBUDDY_SYSTEM_TAG_RES:
+        stripped = pattern.sub("", stripped)
+    stripped = _WORKBUDDY_USER_QUERY_RE.sub(lambda match: match.group(1), stripped)
+    return stripped.strip()
+
+
+def _workbuddy_user_text(content: Any) -> str:
+    """Visible user text: providerData.content first, else tag-stripped input_text."""
+    if isinstance(content, str):
+        return _workbuddy_strip_system_tags(content)
+    if not isinstance(content, list):
+        return ""
+    for block in content:
+        if isinstance(block, str):
+            extracted = _workbuddy_strip_system_tags(block)
+            if extracted:
+                return extracted
+            continue
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type and block_type != "input_text":
+            continue
+        text = block.get("text") or block.get("input_text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if "<image_local_path>" in text:
+            continue
+        if text.lstrip().startswith("<system-reminder") and "<user_query>" not in text:
+            continue
+        provider = block.get("providerData")
+        if isinstance(provider, dict) and isinstance(provider.get("content"), str):
+            provider_content = provider["content"].strip()
+            if provider_content:
+                return core._safe_text(provider_content)
+        extracted = _workbuddy_strip_system_tags(text)
+        if extracted:
+            return extracted
+    return ""
+
+
+def _workbuddy_append_turn(
+    turns: list[dict[str, Any]],
+    role: str,
+    text: str,
+) -> None:
+    if not text:
+        return
+    if (
+        turns
+        and turns[-1].get("role") == role
+        and not turns[-1].get("tool_calls")
+        and not turns[-1].get("tool_results")
+    ):
+        turns[-1]["text"] = core._safe_text(turns[-1].get("text")) + "\n" + text
+        return
+    turns.append(core._turn(role, text=text))
+
+
+def _workbuddy_call_id(record: dict[str, Any], index: int) -> str:
+    for key in ("callId", "call_id", "id"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return f"workbuddy-call-{index}"
+
+
+def _workbuddy_result_content(record: dict[str, Any], max_tool_chars: int) -> str:
+    output = record.get("output")
+    if isinstance(output, str) and output.strip():
+        return core._json_preview(output, max_tool_chars)
+    provider = record.get("providerData")
+    if isinstance(provider, dict):
+        tool_result = provider.get("toolResult") or provider.get("workbuddyToolResult")
+        if tool_result is not None:
+            return core._json_preview(tool_result, max_tool_chars)
+    return core._json_preview(output, max_tool_chars)
+
+
+def _workbuddy_result_is_error(record: dict[str, Any]) -> bool:
+    status = record.get("status")
+    if isinstance(status, str) and status in {"incomplete", "failed", "error"}:
+        return True
+    provider = record.get("providerData")
+    if isinstance(provider, dict):
+        tool_result = provider.get("toolResult")
+        if isinstance(tool_result, dict) and tool_result.get("isError") is True:
+            return True
+    return False
+
+
+def _workbuddy_session_info(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """cwd, titles, model, and timestamps exactly like the app's JSONL scan."""
+    cwd: str | None = None
+    custom_title: str | None = None
+    ai_title: str | None = None
+    topic: str | None = None
+    first_user_text: str | None = None
+    model: str | None = None
+    first_ts: int | None = None
+    last_ts: int | None = None
+    has_turn = False
+    for record in records:
+        timestamp = core._timestamp_to_millis(record.get("timestamp"))
+        if timestamp is not None:
+            if first_ts is None:
+                first_ts = timestamp
+            last_ts = timestamp
+        if cwd is None:
+            value = record.get("cwd")
+            if isinstance(value, str) and value:
+                cwd = value
+        if model is None:
+            value = record.get("model")
+            if isinstance(value, str) and value:
+                model = value
+        record_type = record.get("type")
+        if record_type == "custom-title":
+            value = record.get("customTitle")
+            if isinstance(value, str) and value.strip():
+                custom_title = value.strip()
+        elif record_type == "ai-title":
+            value = record.get("aiTitle")
+            if ai_title is None and isinstance(value, str) and value.strip():
+                ai_title = value.strip()
+        elif record_type == "topic":
+            value = record.get("topic")
+            if topic is None and isinstance(value, str) and value.strip():
+                topic = value.strip()
+        elif record_type == "message" and record.get("role") in {"user", "assistant"}:
+            if _workbuddy_meta_record(record):
+                continue
+            has_turn = True
+            if first_user_text is None and record.get("role") == "user":
+                text = _workbuddy_user_text(record.get("content"))
+                if text:
+                    first_user_text = core._one_line(text, 120)
+    title = custom_title or ai_title or topic
+    if not title and first_user_text:
+        title = (
+            first_user_text if len(first_user_text) <= 50
+            else first_user_text[:50] + "..."
+        )
+    return {
+        "cwd": cwd,
+        "title": title,
+        "model": model,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "has_turn": has_turn,
+    }
+
+
+class WorkBuddyAdapter(ProviderAdapter):
+    """Read WorkBuddy/CodeBuddy projects JSONL as inert history.
+
+    Session transcripts live at ``<config>/projects/<compressedCwd>/<id>.jsonl``
+    where ``<config>`` resolves like the app: ``WORKBUDDY_CONFIG_DIR`` or
+    ``CODEBUDDY_CONFIG_DIR``, else ``~/.workbuddy-ai`` (this product's
+    ``dataFolderName``) or the legacy ``~/.workbuddy``. ``WORKBUDDY_DATA_FOLDER_NAME``
+    names a different folder under home. ``<id>.quickask`` marked files are
+    quick-ask scratch sessions and are skipped. ``workbuddy.db`` is only an
+    index; the JSONL transcript is authoritative.
+    """
+
+    tool = "workbuddy"
+
+    @staticmethod
+    def _roots() -> list[Path]:
+        for variable in ("WORKBUDDY_CONFIG_DIR", "CODEBUDDY_CONFIG_DIR"):
+            value = os.environ.get(variable, "").strip()
+            if value:
+                return [Path(value).expanduser()]
+        folder = os.environ.get("WORKBUDDY_DATA_FOLDER_NAME", "").strip()
+        if folder:
+            return [Path.home() / folder]
+        return [Path.home() / ".workbuddy-ai", Path.home() / ".workbuddy"]
+
+    @staticmethod
+    def _project_names(cwd: str) -> list[str]:
+        raw = str(Path(cwd).expanduser())
+        absolute = _absolute_cwd(cwd)
+        canonical = _canonical_cwd(cwd)
+        return list(
+            dict.fromkeys(
+                _workbuddy_project_slug(value)
+                for value in (raw, absolute, canonical)
+            )
+        )
+
+    @classmethod
+    def _iter_jsonl(cls, projects: Path, names: Iterable[str]) -> Iterator[Path]:
+        seen: set[Path] = set()
+        for name in names:
+            workspace = projects / name
+            if not workspace.is_dir() or workspace.is_symlink():
+                continue
+            for path in sorted(workspace.glob("*.jsonl"), key=lambda item: item.name):
+                if path.is_file() and not path.is_symlink() and path not in seen:
+                    seen.add(path)
+                    yield path
+        if seen or not projects.is_dir() or projects.is_symlink():
+            return
+        # Slug collisions are lossy; fall back to record-level cwd matching.
+        for workspace in sorted(projects.iterdir(), key=lambda item: item.name):
+            if not workspace.is_dir() or workspace.is_symlink():
+                continue
+            for path in sorted(workspace.glob("*.jsonl"), key=lambda item: item.name):
+                if path.is_file() and not path.is_symlink() and path not in seen:
+                    seen.add(path)
+                    yield path
+
+    @classmethod
+    def _files_for_cwd(cls, cwd: str) -> Iterator[Path]:
+        names = cls._project_names(cwd)
+        for root in cls._roots():
+            yield from cls._iter_jsonl(root / "projects", names)
+
+    @classmethod
+    def _all_files(cls) -> Iterator[Path]:
+        for root in cls._roots():
+            projects = root / "projects"
+            if not projects.is_dir() or projects.is_symlink():
+                continue
+            for workspace in sorted(projects.iterdir(), key=lambda item: item.name):
+                if not workspace.is_dir() or workspace.is_symlink():
+                    continue
+                for path in sorted(workspace.glob("*.jsonl"), key=lambda item: item.name):
+                    if path.is_file() and not path.is_symlink():
+                        yield path
+
+    @staticmethod
+    def _is_quick_ask(path: Path) -> bool:
+        marker = path.with_name(f"{path.stem}.quickask")
+        try:
+            return marker.exists()
+        except OSError:
+            return False
+
+    @classmethod
+    def _candidate_from_file(
+        cls,
+        path: Path,
+        cwd: str,
+        *,
+        require_cwd: bool,
+    ) -> dict[str, Any] | None:
+        if (
+            not path.is_file()
+            or path.is_symlink()
+            or path.suffix != ".jsonl"
+            or cls._is_quick_ask(path)
+        ):
+            return None
+        try:
+            records, _malformed = core._read_plain_jsonl(path)
+        except core.ReaderError:
+            return None
+        meta = _read_json_optional(path.with_name(f"{path.stem}.meta.json")) or {}
+        info = _workbuddy_session_info(records)
+        if not info["has_turn"]:
+            return None
+        actual_cwd = info["cwd"]
+        if not actual_cwd:
+            meta_cwd = meta.get("cwd")
+            actual_cwd = meta_cwd if isinstance(meta_cwd, str) else None
+        if require_cwd and not _same_cwd(actual_cwd, cwd):
+            return None
+        created_ms = core._timestamp_to_millis(meta.get("createdAt")) or info["first_ts"]
+        updated_ms = (
+            core._timestamp_to_millis(meta.get("updatedAt"))
+            or info["last_ts"]
+            or core._mtime_millis(path)
+        )
+        model = info["model"]
+        if not model:
+            meta_model = meta.get("model")
+            model = meta_model if isinstance(meta_model, str) else None
+        return {
+            "tool": "workbuddy",
+            "source": "workbuddy",
+            "session_id": core._safe_text(path.stem),
+            "path": str(path),
+            "title": info["title"],
+            "cwd": core._safe_text(actual_cwd) if actual_cwd else None,
+            "branch": None,
+            "created_at": core._iso_from_millis(created_ms),
+            "updated_at_ms": updated_ms,
+            "updated_at": core._iso_from_millis(updated_ms),
+            "source_repo_root_path": None,
+            "model": model,
+        }
+
+    def discover(self, cwd: str, within_min: int) -> list[dict[str, Any]]:
+        self.warnings = []
+        sessions: list[dict[str, Any]] = []
+        for path in self._files_for_cwd(cwd):
+            candidate = self._candidate_from_file(path, cwd, require_cwd=True)
+            if candidate is None:
+                continue
+            if core._within(int(candidate.get("updated_at_ms") or 0), within_min):
+                sessions.append(candidate)
+        return core._sort_and_dedupe(sessions)
+
+    def candidate_from_path(self, raw_path: str, cwd: str) -> dict[str, Any] | None:
+        path = Path(raw_path).expanduser()
+        if not path.exists() or path.is_symlink():
+            return None
+        return self._candidate_from_file(path, cwd, require_cwd=False)
+
+    def find_id(self, session_id: str, cwd: str) -> dict[str, Any] | None:
+        for path in self._files_for_cwd(cwd):
+            if path.stem.casefold() == session_id.casefold():
+                return self._candidate_from_file(path, cwd, require_cwd=False)
+        for path in self._all_files():
+            if path.stem.casefold() != session_id.casefold():
+                continue
+            return self._candidate_from_file(path, cwd, require_cwd=False)
+        return None
+
+    def read(self, candidate: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
+        path = Path(str(candidate["path"]))
+        records, malformed = core._read_plain_jsonl(path)
+        warnings: list[dict[str, str]] = []
+        turns: list[dict[str, Any]] = []
+        summaries: list[dict[str, Any]] = []
+        emitted_calls: set[str] = set()
+        emitted_results: set[str] = set()
+        hidden_thoughts = 0
+        filtered_records = 0
+        unknown_records = 0
+
+        for index, record in enumerate(records):
+            record_type = record.get("type")
+            if record_type in _WORKBUDDY_CUSTOM_ITEM_TYPES:
+                if record_type == "summary":
+                    content = (
+                        record.get("summary")
+                        or record.get("text")
+                        or record.get("content")
+                    )
+                    if isinstance(content, str) and content.strip():
+                        summaries.append(
+                            {
+                                "kind": "summary",
+                                "content": core._safe_text(content),
+                                "inert": True,
+                            }
+                        )
+                continue
+            if record_type == "message":
+                role = record.get("role")
+                if _workbuddy_meta_record(record):
+                    filtered_records += 1
+                    continue
+                if role == "user":
+                    text = _workbuddy_user_text(record.get("content"))
+                    _workbuddy_append_turn(turns, "user", text)
+                elif role == "assistant":
+                    text = _workbuddy_assistant_text(record.get("content"))
+                    _workbuddy_append_turn(turns, "assistant", text)
+                else:
+                    filtered_records += 1
+            elif record_type == "reasoning":
+                hidden_thoughts += 1
+            elif record_type == "function_call":
+                call_id = _workbuddy_call_id(record, index)
+                if call_id in emitted_calls:
+                    continue
+                emitted_calls.add(call_id)
+                name = record.get("name")
+                turns.append(
+                    core._turn(
+                        "assistant",
+                        tool_calls=[
+                            {
+                                "id": core._safe_text(call_id),
+                                "name": core._safe_text(name) if name else "workbuddy_tool",
+                                "input": core._json_preview(
+                                    record.get("arguments") or {},
+                                    max_tool_chars,
+                                ),
+                                "inert": True,
+                            }
+                        ],
+                    )
+                )
+            elif record_type in {"function_call_result", "function_call_output"}:
+                call_id = _workbuddy_call_id(record, index)
+                if call_id in emitted_results:
+                    continue
+                emitted_results.add(call_id)
+                turns.append(
+                    core._turn(
+                        "tool",
+                        tool_results=[
+                            {
+                                "tool_use_id": core._safe_text(call_id),
+                                "content": _workbuddy_result_content(
+                                    record,
+                                    max_tool_chars,
+                                ),
+                                "is_error": _workbuddy_result_is_error(record),
+                                "unavailable": False,
+                                "inert": True,
+                            }
+                        ],
+                    )
+                )
+            else:
+                unknown_records += 1
+
+        if malformed:
+            core._add_warning(
+                warnings,
+                "malformed_records_skipped",
+                f"Skipped {malformed} malformed WorkBuddy record(s).",
+            )
+        if hidden_thoughts:
+            core._add_warning(
+                warnings,
+                "hidden_reasoning_skipped",
+                f"Excluded {hidden_thoughts} WorkBuddy reasoning record(s).",
+            )
+        if filtered_records:
+            core._add_warning(
+                warnings,
+                "internal_records_skipped",
+                f"Excluded {filtered_records} WorkBuddy internal or meta record(s).",
+            )
+        if hidden_thoughts or filtered_records:
+            core._add_warning(
+                warnings,
+                "unsafe_records_skipped",
+                "WorkBuddy hidden-reasoning or internal records were excluded from inert history.",
+            )
+        if unknown_records:
+            core._add_warning(
+                warnings,
+                "unknown_records_skipped",
+                f"Skipped {unknown_records} unsupported WorkBuddy record(s).",
+            )
+
+        result = {
+            "tool": "workbuddy",
+            "source": "workbuddy",
+            "session_id": candidate.get("session_id"),
+            "path": str(path),
+            "title": candidate.get("title"),
+            "cwd": candidate.get("cwd"),
+            "branch": None,
+            "created_at": candidate.get("created_at"),
+            "updated_at": candidate.get("updated_at"),
+            "source_repo_root_path": None,
+            "model": candidate.get("model"),
+            "turns": turns,
+            "summaries": summaries,
+            "warnings": warnings,
+        }
+        return core._finalize_result(result)
+
+
+def _workbuddy_assistant_text(content: Any) -> str:
+    parts: list[str] = []
+    for block in core._blocks(content):
+        block_type = block.get("type")
+        if block_type in {"output_text", "text"}:
+            text = block.get("text")
+            if isinstance(text, str) and text:
+                parts.append(text)
+    return core._safe_text("\n".join(parts))
+
+
 ADAPTERS: dict[str, ProviderAdapter] = {
     "grok": GrokAdapter(),
     "pi": PiAdapter(),
     "zcode": ZCodeAdapter(),
+    "workbuddy": WorkBuddyAdapter(),
 }
 
 

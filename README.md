@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-把 Codex、Claude Code、Cursor、Grok、Pi、ZCode 的本机会话整理成可继续工作的上下文，在 DeepSeek Harness 中接着做。
+把 Codex、Claude Code、Cursor、Grok、Pi、WorkBuddy、ZCode 的本机会话整理成可继续工作的上下文，在 DeepSeek Harness 中接着做。
 
 ## 安装
 
@@ -12,7 +12,7 @@
 
 1. 打开 **插件 → 添加插件**（部分版本入口在设置里）。
 2. 在 **包名或地址** 中填入 `github:aa2246740/dsh-resume#v0.2.4`，然后安装并启用。
-3. 按安装器提示完成激活，在输入框输入 `/resume-`，确认能看到下面列出的六条命令。
+3. 按安装器提示完成激活，在输入框输入 `/resume-`，确认能看到下面列出的七条命令。
 
 也可以在 [v0.2.4 Release](https://github.com/aa2246740/dsh-resume/releases/tag/v0.2.4) 下载 `dsh-resume-0.2.4.tgz`，把该文件的绝对路径填入同一安装框。桌面端使用自己的 desktop profile，无需运行 Web Host 命令。
 
@@ -44,7 +44,7 @@ dsh plugin --profile web remove dsh-resume
 
 ## 使用
 
-输入 `/resume-claude`，另外五条同理。它只读本机那次会话，抽出还能接手的上下文，写成一张交接卡。旧进程不会被拉起来，别人的会话文件也不会被改。
+输入 `/resume-claude`，另外六条同理。它只读本机那次会话，抽出还能接手的上下文，写成一张交接卡。旧进程不会被拉起来，别人的会话文件也不会被改。
 
 ![官方 composer 已输入 /resume-claude](docs/screenshots/composer-resume-claude.png)
 
@@ -58,7 +58,7 @@ dsh plugin --profile web remove dsh-resume
 
 ## 命令
 
-只读，不改任何一家的会话仓库。系统提示、隐藏推理、加密或坏掉的记录要么丢掉，要么标明不可用。历史里的结论先标成 `HISTORY_REPORTED`，这轮在当前仓库里核对过的才是 `CURRENT_OBSERVED`。Grok 只读看得见的 `updates.jsonl`。Pi 只跟当前这条分支。ZCode 只读 `cli/db/db.sqlite`，不回放调用、不复活进程。压缩只标成警告，库里仍在的更早记录会保留。废弃的 `v2/sessions` 和 `cli/rollout` JSONL 不是主存储；只有 sqlite 不在时，才对 `projects/` 下的 JSONL 做带警告的尽力读取。
+只读，不改任何一家的会话仓库。系统提示、隐藏推理、加密或坏掉的记录要么丢掉，要么标明不可用。历史里的结论先标成 `HISTORY_REPORTED`，这轮在当前仓库里核对过的才是 `CURRENT_OBSERVED`。Grok 只读看得见的 `updates.jsonl`。Pi 只跟当前这条分支。ZCode 只读 `cli/db/db.sqlite`，不回放调用、不复活进程。压缩只标成警告，库里仍在的更早记录会保留。废弃的 `v2/sessions` 和 `cli/rollout` JSONL 不是主存储；只有 sqlite 不在时，才对 `projects/` 下的 JSONL 做带警告的尽力读取。WorkBuddy 只读 `projects/<工作区>/<会话 id>.jsonl`（配置根目录按 `WORKBUDDY_CONFIG_DIR` → `CODEBUDDY_CONFIG_DIR` → `~/.workbuddy-ai`/`~/.workbuddy` 解析），不回放调用、不复活应用；隐藏推理、meta/compact/steer/teammate 记录和 quick-ask 草稿会话都会被跳过，`workbuddy.db` 只是索引、不读取。
 
 | 命令 | 从哪接着 |
 | --- | --- |
@@ -67,6 +67,7 @@ dsh plugin --profile web remove dsh-resume
 | `/resume-cursor [latest \| 会话 id \| 路径 \| 标题]` | Cursor |
 | `/resume-grok [latest \| 会话 id \| 路径 \| 标题]` | Grok |
 | `/resume-pi [latest \| 会话 id \| 路径 \| 标题]` | Pi |
+| `/resume-workbuddy [latest \| 会话 id \| 路径 \| 标题]` | WorkBuddy |
 | `/resume-zcode [latest \| 会话 id \| 路径 \| 标题]` | ZCode |
 
 ## 开发
