@@ -1739,8 +1739,85 @@ class ZCodeAdapter(ProviderAdapter):
         return self._read_sqlite(candidate, max_tool_chars)
 
 
-_QODER_INFORMATIONAL_TYPES = {"runtime-config", "file-history-snapshot", "last-prompt"}
+_QODER_INFORMATIONAL_TYPES = {
+    "runtime-config",
+    "file-history-snapshot",
+    "last-prompt",
+    # Housekeeping records emitted by qodercli: injected context listings,
+    # leaf tracking, workspace metadata, and worktree state. Known and
+    # intentionally not rendered — attachment content is Qoder-injected
+    # context, not user/assistant turns.
+    "attachment",
+    "active-leaf",
+    "workspace-directories",
+    "worktree-state",
+}
 _QODER_KNOWN_TYPES = set(core.CLAUDE_KNOWN_TYPES) | _QODER_INFORMATIONAL_TYPES
+
+_QODER_MESSAGE_TYPES = {"user", "assistant", "system"}
+
+
+def _qoder_message_eligible(record: dict[str, Any]) -> bool:
+    return (
+        record.get("type") in _QODER_MESSAGE_TYPES
+        and not record.get("isSidechain")
+        and isinstance(record.get("uuid"), str)
+        and bool(record.get("uuid"))
+    )
+
+
+def _repair_qoder_parents(records: list[dict[str, Any]]) -> None:
+    """Repoint message parent links that cross non-message records.
+
+    qodercli interleaves housekeeping records (``attachment``, ``active-leaf``,
+    ...) inside the parentUuid chain, so an assistant's parentUuid can point at
+    a record that is filtered out before rendering. Walk each message record's
+    chain through those non-message records to the nearest message ancestor so
+    no turns (notably the opening user prompt) are orphaned.
+    """
+    by_uuid = {
+        record["uuid"]: record
+        for record in records
+        if isinstance(record.get("uuid"), str) and record["uuid"]
+    }
+    for record in records:
+        if not _qoder_message_eligible(record):
+            continue
+        parent = core._claude_parent(record)
+        if parent is None or parent not in by_uuid:
+            continue
+        seen: set[str] = {str(record.get("uuid"))}
+        resolved = parent
+        while resolved is not None and resolved in by_uuid:
+            target = by_uuid[resolved]
+            if _qoder_message_eligible(target):
+                break
+            if resolved in seen:
+                resolved = None
+                break
+            seen.add(resolved)
+            resolved = core._claude_parent(target)
+        if resolved != parent:
+            core._set_claude_parent(record, resolved)
+
+
+def _qoder_workspace_dir(records: list[dict[str, Any]]) -> str | None:
+    for record in records:
+        if record.get("type") != "workspace-directories":
+            continue
+        directories = record.get("directories")
+        if isinstance(directories, list):
+            value = next(
+                (
+                    item
+                    for item in directories
+                    if isinstance(item, str) and item.strip()
+                ),
+                None,
+            )
+            if value:
+                return value
+    return None
 
 
 def _qoder_ide_roots() -> list[Path]:
@@ -1858,6 +1935,8 @@ class QoderAdapter(ProviderAdapter):
             stamp = core._timestamp_to_millis(record.get("timestamp"))
             if stamp is not None:
                 timestamps.append(stamp)
+        if actual_cwd is None:
+            actual_cwd = _qoder_workspace_dir(records)
         if not has_turns:
             return None
         if require_cwd and not _same_cwd(actual_cwd, cwd) and not slug_matches:
@@ -1981,6 +2060,7 @@ class QoderAdapter(ProviderAdapter):
                 "sidechain_records_skipped",
                 f"Skipped {sidechain} Qoder subagent (isSidechain) record(s).",
             )
+        _repair_qoder_parents(records)
         messages = core._prepare_claude_messages(records, warnings)
         leaf = core._claude_leaf(messages, warnings)
         chain: list[dict[str, Any]] = []
@@ -2001,7 +2081,9 @@ class QoderAdapter(ProviderAdapter):
                 if isinstance(record.get("cwd"), str) and record["cwd"].strip()
             ),
             None,
-        ) or (candidate.get("cwd") if isinstance(candidate.get("cwd"), str) else None)
+        ) or _qoder_workspace_dir(records) or (
+            candidate.get("cwd") if isinstance(candidate.get("cwd"), str) else None
+        )
         requested = candidate.get("requested_cwd")
         if (
             isinstance(requested, str)
