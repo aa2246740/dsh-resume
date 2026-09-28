@@ -752,3 +752,181 @@ test('ZCode projects JSONL is only a warned fallback when sqlite is absent', asy
   assert.ok(result.warnings.some(warning => warning.code === 'hidden_reasoning_skipped'))
   assert.doesNotMatch(raw, /ZCODE_JSONL_PRIVATE|ZCODE_ROLLOUT_DECOY|ZCODE_ABANDONED_V2/)
 })
+
+const qoderFixtureBuilder = join(repoRoot, 'tests', 'fixtures', 'qoder_session.py')
+const qoderReader = join(repoRoot, 'resources', 'dsh_session_reader.py')
+
+function qoderEnv(home: string, ide?: string): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    QODER_CONFIG_DIR: home,
+    QODER_IDE_CACHE_DIR: ide ?? join(home, 'no-ide'),
+  }
+}
+
+function buildQoderFixture(home: string, cwd: string, otherCwd: string, ide?: string): void {
+  const args = [
+    qoderFixtureBuilder,
+    '--home',
+    home,
+    '--cwd',
+    cwd,
+    '--other-cwd',
+    otherCwd,
+    ...(ide ? ['--ide', ide] : []),
+  ]
+  const result = spawnSync('python3', args, { encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+}
+
+test('Qoder discovery scopes to cwd and keeps transcript turns inert', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-qoder-'))
+  const previousConfig = process.env.QODER_CONFIG_DIR
+  const previousIde = process.env.QODER_IDE_CACHE_DIR
+  t.after(async () => {
+    if (previousConfig === undefined) delete process.env.QODER_CONFIG_DIR
+    else process.env.QODER_CONFIG_DIR = previousConfig
+    if (previousIde === undefined) delete process.env.QODER_IDE_CACHE_DIR
+    else process.env.QODER_IDE_CACHE_DIR = previousIde
+    await rm(root, { recursive: true, force: true })
+  })
+  const home = join(root, 'qoder-home')
+  const ide = join(root, 'ide-cache')
+  const cwd = join(root, 'workspace')
+  const other = join(root, 'other')
+  buildQoderFixture(home, cwd, other, ide)
+  process.env.QODER_CONFIG_DIR = home
+  process.env.QODER_IDE_CACHE_DIR = ide
+
+  const listed = JSON.parse(await runSessionReader({
+    provider: 'qoder',
+    action: 'list',
+    cwd,
+  })) as { sessions: Array<{ session_id: string, source: string }>, warnings: Array<{ code: string }> }
+  assert.deepEqual(listed.sessions.map(session => session.session_id), [
+    'task-00aa11bb22cc33dd.session.execution',
+    'qoder-session-gadget',
+    'qoder-session-widget',
+  ])
+  assert.equal(listed.sessions[0].source, 'qoder-ide-cache')
+
+  const raw = await runSessionReader({
+    provider: 'qoder',
+    action: 'show',
+    cwd,
+    reference: 'qoder-session-widget',
+  })
+  const result = JSON.parse(raw) as {
+    tool: string
+    source: string
+    model: string | null
+    branch: string
+    turns: Array<{
+      role: string
+      inert: boolean
+      text: string
+      tool_calls?: Array<{ name: string, inert: boolean }>
+      tool_results?: Array<{ content: string, inert: boolean }>
+    }>
+    warnings: Array<{ code: string }>
+    last_user_request: string
+    last_assistant_action: string
+  }
+  assert.equal(result.tool, 'qoder')
+  assert.equal(result.source, 'qoder-cli')
+  assert.equal(result.branch, 'fixture-branch')
+  assert.equal(result.last_user_request, 'Continue the Qoder fixture.')
+  assert.equal(result.last_assistant_action, 'Stopped after the Qoder focused test.')
+  assert.ok(result.turns.every(turn => turn.inert === true))
+  assert.ok(result.turns.some(turn => turn.tool_calls?.some(call => call.name === 'Bash' && call.inert === true)))
+  assert.ok(result.turns.some(turn => turn.tool_results?.some(output => output.content.includes('qoder focused tests passed') && output.inert === true)))
+  assert.ok(result.warnings.some(warning => warning.code === 'sidechain_records_skipped'))
+  assert.doesNotMatch(raw, /QODER_PRIVATE_THINKING|QODER_SIDECHAIN|QODER_OTHER_WORKSPACE|QODER_STATE_DECOY|QODER_COMPACTION_DECOY/)
+})
+
+test('Qoder reference resolution handles ambiguity and title matches', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-qoder-ref-'))
+  const previousConfig = process.env.QODER_CONFIG_DIR
+  const previousIde = process.env.QODER_IDE_CACHE_DIR
+  t.after(async () => {
+    if (previousConfig === undefined) delete process.env.QODER_CONFIG_DIR
+    else process.env.QODER_CONFIG_DIR = previousConfig
+    if (previousIde === undefined) delete process.env.QODER_IDE_CACHE_DIR
+    else process.env.QODER_IDE_CACHE_DIR = previousIde
+    await rm(root, { recursive: true, force: true })
+  })
+  const home = join(root, 'qoder-home')
+  const cwd = join(root, 'workspace')
+  const other = join(root, 'other')
+  buildQoderFixture(home, cwd, other)
+  process.env.QODER_CONFIG_DIR = home
+  process.env.QODER_IDE_CACHE_DIR = join(home, 'no-ide')
+
+  const ambiguous = spawnSync('python3', [
+    qoderReader,
+    'qoder',
+    'show',
+    'continue the qoder',
+    '--cwd',
+    cwd,
+    '--json',
+  ], { encoding: 'utf8', env: qoderEnv(home) })
+  assert.equal(ambiguous.status, 2)
+  assert.match(ambiguous.stderr, /matched 2 sessions/)
+  assert.match(ambiguous.stderr, /qoder-session-widget/)
+  assert.match(ambiguous.stderr, /qoder-session-gadget/)
+
+  const unique = JSON.parse(await runSessionReader({
+    provider: 'qoder',
+    action: 'show',
+    cwd,
+    reference: 'gadget',
+  })) as { session_id: string }
+  assert.equal(unique.session_id, 'qoder-session-gadget')
+})
+
+test('Qoder foreign cwd by id warns, and a missing home fails cleanly', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-qoder-empty-'))
+  const previousConfig = process.env.QODER_CONFIG_DIR
+  const previousIde = process.env.QODER_IDE_CACHE_DIR
+  t.after(async () => {
+    if (previousConfig === undefined) delete process.env.QODER_CONFIG_DIR
+    else process.env.QODER_CONFIG_DIR = previousConfig
+    if (previousIde === undefined) delete process.env.QODER_IDE_CACHE_DIR
+    else process.env.QODER_IDE_CACHE_DIR = previousIde
+    await rm(root, { recursive: true, force: true })
+  })
+  const home = join(root, 'qoder-home')
+  const cwd = join(root, 'workspace')
+  const other = join(root, 'other')
+  buildQoderFixture(home, cwd, other)
+  process.env.QODER_CONFIG_DIR = home
+  process.env.QODER_IDE_CACHE_DIR = join(home, 'no-ide')
+
+  const foreign = JSON.parse(await runSessionReader({
+    provider: 'qoder',
+    action: 'show',
+    cwd,
+    reference: 'qoder-session-other',
+  })) as { session_id: string, warnings: Array<{ code: string }> }
+  assert.equal(foreign.session_id, 'qoder-session-other')
+  assert.ok(foreign.warnings.some(warning => warning.code === 'foreign_cwd_mismatch'))
+
+  const emptyHome = join(root, 'empty-home')
+  await mkdir(emptyHome)
+  process.env.QODER_CONFIG_DIR = emptyHome
+  const missing = JSON.parse(await runSessionReader({
+    provider: 'qoder',
+    action: 'list',
+    cwd,
+  })) as { sessions: unknown[], warnings: Array<{ code: string }> }
+  assert.deepEqual(missing.sessions, [])
+  assert.deepEqual(missing.warnings, [])
+  const missingShow = await runSessionReader({
+    provider: 'qoder',
+    action: 'show',
+    cwd,
+  })
+  assert.match(missingShow, /FOREIGN_SESSION_LOOKUP_NEEDS_INPUT/)
+  assert.match(missingShow, /no qoder session found/)
+})
