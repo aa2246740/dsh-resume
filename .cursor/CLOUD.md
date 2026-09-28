@@ -1,3 +1,5 @@
 # Cloud agent policy
 
-Never launch Task/explore/browser/computerUse/video with other models. Only use grok. Never Claude/GPT/Gemini. Prefer Grok or Composer. Do not spawn Task/CU/browser unless explicitly asked; if a subagent is required, do not pass model — inherit parent.
+Never launch Task, computerUse, or browser unless explicitly required. Never pass a model on subagents; inherit the parent model. Never Claude, Sonnet, Opus, GPT, or Gemini. Prefer Grok or Composer only. Only use grok 4.6 / stay on the parent Grok. Never select Claude, GPT, or Gemini.
+
+Never launch Task, explore, browser, computerUse, or video with another model. Do not spawn other-model subagents.

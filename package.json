@@ -1,6 +1,6 @@
 {
   "name": "dsh-resume",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Continue Codex, Claude Code, Cursor, Grok, Pi, and ZCode work in DeepSeek Harness.",
   "type": "module",
   "main": "lib/dsh-resume.js",
