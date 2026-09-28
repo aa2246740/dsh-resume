@@ -752,3 +752,174 @@ test('ZCode projects JSONL is only a warned fallback when sqlite is absent', asy
   assert.ok(result.warnings.some(warning => warning.code === 'hidden_reasoning_skipped'))
   assert.doesNotMatch(raw, /ZCODE_JSONL_PRIVATE|ZCODE_ROLLOUT_DECOY|ZCODE_ABANDONED_V2/)
 })
+
+const traeFixtureBuilder = join(repoRoot, 'tests', 'fixtures', 'trae_session.py')
+const traeReader = join(repoRoot, 'resources', 'dsh_session_reader.py')
+
+function traeEnv(home: string): NodeJS.ProcessEnv {
+  return { ...process.env, TRAE_HOME: home }
+}
+
+function buildTraeFixture(home: string, cwd: string, otherCwd: string): void {
+  const result = spawnSync('python3', [
+    traeFixtureBuilder,
+    '--home',
+    home,
+    '--cwd',
+    cwd,
+    '--other-cwd',
+    otherCwd,
+  ], { encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+}
+
+test('Trae sqlite discovery skips subagent children and keeps tool parts inert', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-trae-'))
+  const previousHome = process.env.TRAE_HOME
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.TRAE_HOME
+    else process.env.TRAE_HOME = previousHome
+    await rm(root, { recursive: true, force: true })
+  })
+  const home = join(root, 'trae-home')
+  const cwd = join(root, 'workspace')
+  const other = join(root, 'other')
+  buildTraeFixture(home, cwd, other)
+  process.env.TRAE_HOME = home
+
+  const listed = JSON.parse(await runSessionReader({
+    provider: 'trae',
+    action: 'list',
+    cwd,
+  })) as { sessions: Array<{ session_id: string, task_type: string | null }>, warnings: Array<{ code: string }> }
+  assert.deepEqual(listed.sessions.map(session => session.session_id), [
+    'trae-session-gadget',
+    'trae-session-widget',
+  ])
+  assert.ok(listed.sessions.every(session => session.task_type !== 'subagent_child'))
+
+  const raw = await runSessionReader({
+    provider: 'trae',
+    action: 'show',
+    cwd,
+    reference: 'trae-session-widget',
+  })
+  const result = JSON.parse(raw) as {
+    tool: string
+    source: string
+    turns: Array<{
+      role: string
+      inert: boolean
+      text: string
+      tool_calls?: Array<{ name: string, inert: boolean }>
+      tool_results?: Array<{ content: string, inert: boolean }>
+    }>
+    summaries: Array<{ kind: string, inert: boolean, content: string }>
+    warnings: Array<{ code: string }>
+    last_user_request: string
+  }
+  assert.equal(result.tool, 'trae')
+  assert.equal(result.source, 'trae')
+  assert.equal(result.last_user_request, 'Continue the Trae fixture.')
+  assert.ok(result.turns.every(turn => turn.inert === true))
+  assert.ok(result.turns.some(turn => turn.text === 'Prepared the Trae change.'))
+  assert.ok(result.turns.some(turn => turn.tool_calls?.some(call => call.name === 'bash' && call.inert === true)))
+  assert.ok(result.turns.some(turn => turn.tool_results?.some(output => output.content.includes('trae focused tests passed') && output.inert === true)))
+  assert.ok(result.summaries.some(summary => summary.kind === 'compaction' && summary.inert === true))
+  assert.ok(result.warnings.some(warning => warning.code === 'hidden_reasoning_skipped'))
+  assert.ok(result.warnings.some(warning => warning.code === 'compaction_summary'))
+  assert.doesNotMatch(raw, /TRAE_PRIVATE_REASONING|TRAE_SUBAGENT_CHILD|TRAE_OTHER_WORKSPACE/)
+
+  const child = JSON.parse(await runSessionReader({
+    provider: 'trae',
+    action: 'show',
+    cwd,
+    reference: 'trae-session-child',
+  })) as { session_id: string, turns: Array<{ text: string, inert: boolean }> }
+  assert.equal(child.session_id, 'trae-session-child')
+  assert.ok(child.turns.some(turn => turn.text === 'TRAE_SUBAGENT_CHILD' && turn.inert === true))
+})
+
+test('Trae title ambiguity exits 2 and a missing or invalid database fails clearly', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-trae-ref-'))
+  const previousHome = process.env.TRAE_HOME
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.TRAE_HOME
+    else process.env.TRAE_HOME = previousHome
+    await rm(root, { recursive: true, force: true })
+  })
+  const home = join(root, 'trae-home')
+  const cwd = join(root, 'workspace')
+  const other = join(root, 'other')
+  buildTraeFixture(home, cwd, other)
+  process.env.TRAE_HOME = home
+
+  const ambiguous = spawnSync('python3', [
+    traeReader,
+    'trae',
+    'show',
+    'continue the trae',
+    '--cwd',
+    cwd,
+    '--json',
+  ], { encoding: 'utf8', env: traeEnv(home) })
+  assert.equal(ambiguous.status, 2)
+  assert.match(ambiguous.stderr, /matched 2 sessions/)
+  assert.match(ambiguous.stderr, /trae-session-widget/)
+  assert.match(ambiguous.stderr, /trae-session-gadget/)
+
+  const unique = JSON.parse(await runSessionReader({
+    provider: 'trae',
+    action: 'show',
+    cwd,
+    reference: 'widget',
+  })) as { session_id: string }
+  assert.equal(unique.session_id, 'trae-session-widget')
+
+  const otherShow = JSON.parse(await runSessionReader({
+    provider: 'trae',
+    action: 'show',
+    cwd,
+    reference: 'trae-session-other',
+  })) as { session_id: string, cwd: string, warnings: Array<{ code: string }> }
+  assert.equal(otherShow.session_id, 'trae-session-other')
+  assert.ok(otherShow.warnings.some(warning => warning.code === 'cwd_mismatch'))
+
+  const emptyHome = join(root, 'empty-home')
+  await mkdir(emptyHome)
+  process.env.TRAE_HOME = emptyHome
+  const missing = JSON.parse(await runSessionReader({
+    provider: 'trae',
+    action: 'list',
+    cwd,
+  })) as { sessions: unknown[], warnings: Array<{ code: string }> }
+  assert.deepEqual(missing.sessions, [])
+  const missingShow = await runSessionReader({
+    provider: 'trae',
+    action: 'show',
+    cwd,
+  })
+  assert.match(missingShow, /FOREIGN_SESSION_LOOKUP_NEEDS_INPUT/)
+  assert.match(missingShow, /no trae session found/)
+
+  const brokenDb = join(root, 'broken-home', 'ModularData', 'ai-agent', 'database.db')
+  await mkdir(dirname(brokenDb), { recursive: true })
+  const created = spawnSync('python3', ['-c', `
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+connection.execute("CREATE TABLE note (id TEXT)")
+connection.commit()
+connection.close()
+`, brokenDb], { encoding: 'utf8' })
+  assert.equal(created.status, 0, created.stderr)
+  const invalid = spawnSync('python3', [
+    traeReader,
+    'trae',
+    'list',
+    '--cwd',
+    cwd,
+    '--json',
+  ], { encoding: 'utf8', env: traeEnv(join(root, 'broken-home')) })
+  assert.equal(invalid.status, 2)
+  assert.match(invalid.stderr, /missing required table/)
+})

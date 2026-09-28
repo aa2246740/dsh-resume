@@ -52,9 +52,16 @@ export const RESUME_SKILL_SPECS = [
     description: '继续当前工作目录中的 ZCode 会话；可附会话 ID、记录路径或标题关键词。',
     recoveryBoundary: 'The reader uses the ZCode sqlite store at cli/db/db.sqlite and does not replay calls or revive the CLI. Abandoned v2 sessions and cli/rollout JSONL are ignored. Projects JSONL is a warned fallback only when sqlite is absent. Compaction is a summary marker; older rows still stored are kept.',
   },
+  {
+    name: 'resume-trae',
+    provider: 'trae',
+    product: 'Trae',
+    description: '继续当前工作目录中的 Trae 会话；可附会话 ID、记录路径或标题关键词。',
+    recoveryBoundary: 'The reader uses Trae\'s SQLCipher 4 store at ModularData/ai-agent/database.db (TRAE_HOME or TRAE_AGENT_DIR). It decrypts a private snapshot only and never writes back, replays calls, or revives Trae. Hidden thought/reasoning is excluded. ~/.trae, TinyStorage, Chromium Session Storage, and state.vscdb are not transcript sources.',
+  },
 ] as const satisfies readonly ResumeSkillSpec[]
 
-/** One source of truth for all six user-only slash skills. */
+/** One source of truth for all seven user-only slash skills. */
 export function skillRegistration(spec: ResumeSkillSpec): SkillRegistration {
   return {
     name: spec.name,

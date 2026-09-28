@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Extend Grok's foreign-session reader with inert Grok, Pi, and ZCode adapters."""
+"""Extend Grok's foreign-session reader with inert Grok, Pi, ZCode, and Trae adapters."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import re
 import shutil
 import sqlite3
+import struct
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -25,7 +28,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 
-EXTENDED_TOOLS = ("grok", "pi", "zcode")
+EXTENDED_TOOLS = ("grok", "pi", "zcode", "trae")
 TOOLS = (*core.TOOLS, *EXTENDED_TOOLS)
 
 
@@ -1739,10 +1742,899 @@ class ZCodeAdapter(ProviderAdapter):
         return self._read_sqlite(candidate, max_tool_chars)
 
 
+_TRAE_PAGE = 4096
+_TRAE_RESERVE = 80
+_TRAE_XOR_TABLES = (b"rust", b"cpp", b"electron")
+# Public 2026-07 Trae config blob prefix (also present in Trae 3.5.81 libai_agent).
+# This is not the SQLCipher key; the derived key is never written to disk by this reader.
+_TRAE_XOR_PREFIX = bytes.fromhex("452a17351d191e13")
+_TRAE_PBKDF_SALT = bytes.fromhex("123456789abcdef01122334455667788")
+_TRAE_PBKDF_ROUNDS = 100_000
+_TRAE_HIDDEN_PARTS = {"reasoning", "thinking", "redacted_reasoning", "redacted-thinking", "thought"}
+_TRAE_REQUIRED_COLUMNS = {
+    "chat_session": ("session_id", "updated_at"),
+    "chat_message": ("session_id", "message_id"),
+}
+_TRAE_SESSION_OPTIONAL = (
+    "project_id",
+    "created_at",
+    "deleted_at",
+    "session_type",
+    "session_title",
+    "hidden_status",
+    "work_mode",
+    "context",
+)
+_TRAE_REJECTED_STORES = (
+    (
+        "~/.trae and ~/.trae-cn",
+        "ICUBE_USER_DATA_DIR for skills, extensions, and toolhost snapshots — not the agent transcript.",
+    ),
+    (
+        "User/globalStorage/state.vscdb",
+        "VS Code UI state and composer drafts, not ModularData chat_session rows.",
+    ),
+    (
+        "aha/TinyStorage",
+        "Device/network envelope store. Key names may be listed; values are never read or committed.",
+    ),
+    (
+        "Chromium Session Storage / Local Storage / Cookies",
+        "Electron web persist, not the ai-agent SQLCipher store.",
+    ),
+    (
+        "ModularData/ai-agent/snapshot and ModularData/ckg_server",
+        "File snapshots and code-knowledge logs, not chat turns.",
+    ),
+)
+
+
+def _trae_aes_cbc_decrypt(key: bytes, iv: bytes, payload: bytes) -> bytes:
+    try:
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+        decryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+        return decryptor.update(payload) + decryptor.finalize()
+    except ImportError:
+        pass
+    try:
+        from Crypto.Cipher import AES
+
+        return AES.new(key, AES.MODE_CBC, iv).decrypt(payload)
+    except ImportError as exc:
+        raise core.ReaderError(
+            "Trae ModularData/ai-agent/database.db is SQLCipher 4. "
+            "Install the Python cryptography package (or PyCryptodome) to open a private snapshot, "
+            "or set TRAE_HOME to a plaintext fixture database."
+        ) from exc
+
+
+def _trae_dylib_candidates() -> list[Path]:
+    configured = os.environ.get("TRAE_DYLIB")
+    paths: list[Path] = []
+    if configured:
+        paths.append(Path(configured).expanduser())
+    if sys.platform == "darwin":
+        paths.extend(
+            [
+                Path("/Applications/Trae.app/Contents/Resources/app/modules/ai-agent/libai_agent.dylib"),
+                Path("/Applications/Trae CN.app/Contents/Resources/app/modules/ai-agent/libai_agent.dylib"),
+            ]
+        )
+    elif sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            paths.extend(
+                [
+                    Path(local) / "Programs" / "Trae" / "resources" / "app" / "modules" / "ai-agent" / "ai_agent.dll",
+                    Path(local) / "Programs" / "Trae CN" / "resources" / "app" / "modules" / "ai-agent" / "ai_agent.dll",
+                ]
+            )
+    return paths
+
+
+def _trae_passphrase_from_dylib(data: bytes) -> bytes | None:
+    index = data.find(_TRAE_XOR_PREFIX)
+    if index < 0 or index + 32 > len(data):
+        return None
+    blob = data[index : index + 32]
+    return bytes(
+        blob[i]
+        ^ _TRAE_XOR_TABLES[0][i % 4]
+        ^ _TRAE_XOR_TABLES[1][i % 3]
+        ^ _TRAE_XOR_TABLES[2][i % 8]
+        for i in range(32)
+    )
+
+
+def _trae_pbkdf_salt(data: bytes | None) -> bytes:
+    if data and data.find(_TRAE_PBKDF_SALT) >= 0:
+        return _TRAE_PBKDF_SALT
+    return _TRAE_PBKDF_SALT
+
+
+def _trae_raw_key_from_env() -> bytes | None:
+    raw = (os.environ.get("TRAE_DB_KEY") or "").strip()
+    if not raw:
+        return None
+    if raw.lower().startswith("x'") and raw.endswith("'"):
+        raw = raw[2:-1]
+    if len(raw) != 64:
+        raise core.ReaderError("TRAE_DB_KEY must be a 64-character hex SQLCipher raw key")
+    try:
+        return bytes.fromhex(raw)
+    except ValueError as exc:
+        raise core.ReaderError("TRAE_DB_KEY must be hexadecimal") from exc
+
+
+def _trae_hmac_matches(page: bytes, key: bytes) -> bool:
+    if len(page) < _TRAE_PAGE:
+        return False
+    file_salt = page[:16]
+    mac_salt = bytes(byte ^ 0x3A for byte in file_salt)
+    mac_key = hashlib.pbkdf2_hmac("sha512", key, mac_salt, 2, dklen=32)
+    hmac_data = page[16 : _TRAE_PAGE - _TRAE_RESERVE + 16]
+    stored = page[_TRAE_PAGE - 64 : _TRAE_PAGE]
+    computed = hmac.new(mac_key, hmac_data + struct.pack("<I", 1), hashlib.sha512).digest()
+    return hmac.compare_digest(computed, stored)
+
+
+def _trae_derive_raw_key(database_path: Path) -> bytes:
+    env_key = _trae_raw_key_from_env()
+    page = database_path.read_bytes()[:_TRAE_PAGE]
+    if env_key is not None:
+        if _trae_hmac_matches(page, env_key):
+            return env_key
+        raise core.ReaderError("TRAE_DB_KEY did not open the Trae SQLCipher store")
+    last_error: str | None = None
+    for dylib in _trae_dylib_candidates():
+        if not dylib.is_file() or dylib.is_symlink():
+            continue
+        try:
+            data = dylib.read_bytes()
+        except OSError as exc:
+            last_error = str(exc)
+            continue
+        passphrase = _trae_passphrase_from_dylib(data)
+        if passphrase is None:
+            continue
+        key = hashlib.pbkdf2_hmac(
+            "sha256",
+            passphrase,
+            _trae_pbkdf_salt(data),
+            _TRAE_PBKDF_ROUNDS,
+            dklen=32,
+        )
+        if _trae_hmac_matches(page, key):
+            return key
+        last_error = f"derived material from {dylib} did not verify against {database_path}"
+    raise core.ReaderError(
+        "Could not open Trae SQLCipher store at "
+        f"{database_path}. Set TRAE_DB_KEY to a 64-hex raw key for this machine, "
+        "or keep the official Trae app installed so the reader can derive a private snapshot key. "
+        f"Last error: {last_error or 'no Trae dylib candidates'}"
+    )
+
+
+def _trae_decrypt_page(page: bytes, pageno: int, key: bytes) -> bytes:
+    page = page[:_TRAE_PAGE].ljust(_TRAE_PAGE, b"\x00")
+    if pageno == 1:
+        encrypted = page[16 : _TRAE_PAGE - _TRAE_RESERVE]
+        iv = page[_TRAE_PAGE - _TRAE_RESERVE : _TRAE_PAGE - _TRAE_RESERVE + 16]
+        body = _trae_aes_cbc_decrypt(key, iv, encrypted)
+        plain = bytearray(_TRAE_PAGE)
+        plain[:16] = b"SQLite format 3\x00"
+        plain[16 : _TRAE_PAGE - _TRAE_RESERVE] = body
+        return bytes(plain)
+    encrypted = page[: _TRAE_PAGE - _TRAE_RESERVE]
+    iv = page[_TRAE_PAGE - _TRAE_RESERVE : _TRAE_PAGE - _TRAE_RESERVE + 16]
+    body = _trae_aes_cbc_decrypt(key, iv, encrypted)
+    plain = bytearray(_TRAE_PAGE)
+    plain[: _TRAE_PAGE - _TRAE_RESERVE] = body
+    return bytes(plain)
+
+
+def _trae_decrypt_sqlcipher(path: Path) -> bytes:
+    raw = path.read_bytes()
+    if raw.startswith(b"SQLite format 3\x00"):
+        return raw
+    if len(raw) < 16:
+        raise core.ReaderError(f"Trae sqlite store is missing: {path}")
+    key = _trae_derive_raw_key(path)
+    pages = max(1, len(raw) // _TRAE_PAGE)
+    plain = bytearray()
+    for index in range(pages):
+        plain.extend(_trae_decrypt_page(raw[index * _TRAE_PAGE : (index + 1) * _TRAE_PAGE], index + 1, key))
+    wal_path = Path(f"{path}-wal")
+    if wal_path.is_file() and not wal_path.is_symlink():
+        wal = wal_path.read_bytes()
+        if len(wal) >= 32 and wal[:4] == bytes.fromhex("377f0682"):
+            offset = 32
+            max_page = pages
+            while offset + 24 + _TRAE_PAGE <= len(wal):
+                pageno = struct.unpack(">I", wal[offset : offset + 4])[0]
+                if pageno == 0:
+                    break
+                payload = wal[offset + 24 : offset + 24 + _TRAE_PAGE]
+                page = _trae_decrypt_page(payload, pageno, key)
+                start = (pageno - 1) * _TRAE_PAGE
+                if len(plain) < start + _TRAE_PAGE:
+                    plain.extend(b"\x00" * (start + _TRAE_PAGE - len(plain)))
+                plain[start : start + _TRAE_PAGE] = page
+                max_page = max(max_page, pageno)
+                offset += 24 + _TRAE_PAGE
+            struct.pack_into(">I", plain, 28, max_page)
+    return bytes(plain)
+
+
+def _connect_trae_snapshot(path: Path) -> tuple[sqlite3.Connection, tempfile.TemporaryDirectory[str] | None]:
+    if not path.is_file() or path.is_symlink():
+        raise core.ReaderError(f"Trae sqlite store is missing: {path}")
+    header = path.read_bytes()[:16]
+    temp = tempfile.TemporaryDirectory(prefix="dsh-trae-")
+    snapshot = Path(temp.name) / "db.sqlite"
+    try:
+        if header == b"SQLite format 3\x00":
+            shutil.copy2(path, snapshot)
+            for suffix in ("-wal", "-shm"):
+                sibling = Path(f"{path}{suffix}")
+                if sibling.is_file() and not sibling.is_symlink():
+                    shutil.copy2(sibling, Path(f"{snapshot}{suffix}"))
+        else:
+            snapshot.write_bytes(_trae_decrypt_sqlcipher(path))
+        database = sqlite3.connect(f"{snapshot.resolve().as_uri()}?mode=ro", uri=True)
+    except (OSError, sqlite3.Error) as exc:
+        temp.cleanup()
+        raise core.ReaderError(f"failed to open Trae sqlite store {path}: {exc}") from exc
+    database.row_factory = sqlite3.Row
+    try:
+        database.execute("PRAGMA query_only = ON")
+        database.execute("PRAGMA busy_timeout = 1000")
+    except sqlite3.Error as exc:
+        database.close()
+        temp.cleanup()
+        raise core.ReaderError(f"failed to open Trae sqlite store {path}: {exc}") from exc
+    return database, temp
+
+
+@contextmanager
+def _trae_database(path: Path) -> Iterator[sqlite3.Connection]:
+    database, temp = _connect_trae_snapshot(path)
+    try:
+        yield database
+    finally:
+        database.close()
+        if temp is not None:
+            temp.cleanup()
+
+
+def _require_trae_schema(
+    database: sqlite3.Connection,
+    path: Path,
+) -> tuple[dict[str, set[str]], list[dict[str, str]]]:
+    warnings: list[dict[str, str]] = []
+    tables = _sqlite_tables(database)
+    missing = [name for name in _TRAE_REQUIRED_COLUMNS if name not in tables]
+    if missing:
+        raise core.ReaderError(
+            f"Trae database {path} is missing required table(s): {', '.join(missing)}"
+        )
+    columns: dict[str, set[str]] = {}
+    for table, required in _TRAE_REQUIRED_COLUMNS.items():
+        present = _sqlite_columns(database, table)
+        absent = [name for name in required if name not in present]
+        if absent:
+            raise core.ReaderError(
+                f"Trae table {table} in {path} is missing required column(s): {', '.join(absent)}"
+            )
+        columns[table] = present
+    for table in (
+        "project",
+        "session_project",
+        "chat_message_chat",
+        "chat_message_general",
+        "chat_message_task",
+        "toolcall",
+        "agent_run",
+        "history_v2",
+        "multi_root_path",
+    ):
+        if table in tables:
+            columns[table] = _sqlite_columns(database, table)
+    return columns, warnings
+
+
+def _trae_hidden_session(row: sqlite3.Row) -> bool:
+    deleted = _row_value(row, "deleted_at")
+    if deleted not in (None, "", 0):
+        return True
+    hidden = _row_value(row, "hidden_status")
+    if isinstance(hidden, str) and hidden.strip() and hidden.strip().casefold() not in {"", "visible", "0", "false"}:
+        return True
+    if hidden in (1, True):
+        return True
+    return False
+
+
+def _trae_is_subagent(row: sqlite3.Row, payload: dict[str, Any]) -> bool:
+    session_type = _session_text(row, payload, "session_type", "sessionType")
+    if session_type and session_type.casefold() in {"subagent", "subagent_child", "sub_agent"}:
+        return True
+    return False
+
+
+def _trae_parse_content(raw: Any, warnings: list[dict[str, str]]) -> tuple[str, int]:
+    hidden = 0
+    if raw is None:
+        return "", 0
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", errors="replace")
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                parsed = None
+            if parsed is not None:
+                return _trae_parse_content(parsed, warnings)
+        return core._safe_text(raw), 0
+    if isinstance(raw, dict):
+        raw_type = str(raw.get("type") or "").casefold()
+        if raw_type in _TRAE_HIDDEN_PARTS or raw.get("thought") not in (None, "", False) and raw_type == "thought":
+            return "", 1
+        if raw_type in _TRAE_HIDDEN_PARTS:
+            return "", 1
+        text = raw.get("text") or raw.get("content") or raw.get("message")
+        if isinstance(text, str):
+            return core._safe_text(text), 0
+        if isinstance(text, list):
+            return _trae_parse_content(text, warnings)[0], 0
+        return core._safe_text(raw), 0
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for item in raw:
+            if isinstance(item, dict):
+                item_type = str(item.get("type") or "").casefold()
+                if item_type in _TRAE_HIDDEN_PARTS:
+                    hidden += 1
+                    continue
+                text = item.get("text") or item.get("content")
+                if isinstance(text, str) and text:
+                    parts.append(core._safe_text(text))
+            elif isinstance(item, str) and item:
+                parts.append(core._safe_text(item))
+        return "\n".join(parts), hidden
+    return core._safe_text(raw), 0
+
+
+def _trae_tool_record(
+    name: Any,
+    params: Any,
+    result: Any,
+    status: Any,
+    call_id: Any,
+    index: int,
+    max_tool_chars: int,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    ident = core._safe_text(call_id) if call_id not in (None, "") else f"trae-call-{index}"
+    call = {
+        "id": ident,
+        "name": core._safe_text(name) if name not in (None, "") else "trae_tool",
+        "input": core._json_preview(params if params is not None else {}, max_tool_chars),
+        "inert": True,
+    }
+    if status in {None, "", "pending", "running"} and result in (None, ""):
+        return call, None
+    is_error = str(status or "").casefold() in {"error", "failed", "fail"}
+    content = (
+        _bounded_text(result, max_tool_chars)
+        if isinstance(result, str)
+        else core._json_preview(result if result is not None else "", max_tool_chars)
+    )
+    return call, {
+        "tool_use_id": ident,
+        "content": content,
+        "is_error": is_error,
+        "unavailable": False,
+        "inert": True,
+    }
+
+
+class TraeAdapter(ProviderAdapter):
+    """Read Trae's ModularData ai-agent SQLCipher store as inert history.
+
+    Primary store: ``$TRAE_AGENT_DIR/database.db`` or
+    ``$TRAE_HOME/ModularData/ai-agent/database.db``. On macOS the default home
+    is ``~/Library/Application Support/Trae`` (Trae CN is a fallback home only
+    when international Trae is absent). Discovery is scoped to the current DSH
+    cwd via ``project.absolute_path`` / ``session_project``. The live file is
+    SQLCipher 4; this reader copies a private snapshot, decrypts it in memory,
+    and never writes back or revives Trae. ``~/.trae``, TinyStorage, Chromium
+    storage, and ``state.vscdb`` are not transcript sources.
+    """
+
+    tool = "trae"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._request_cwd: str | None = None
+
+    @staticmethod
+    def _home() -> Path:
+        configured = os.environ.get("TRAE_HOME")
+        if configured:
+            return Path(configured).expanduser()
+        if sys.platform == "darwin":
+            international = Path.home() / "Library" / "Application Support" / "Trae"
+            chinese = Path.home() / "Library" / "Application Support" / "Trae CN"
+            if international.exists() or not chinese.exists():
+                return international
+            return chinese
+        if sys.platform == "win32":
+            roaming = os.environ.get("APPDATA")
+            base = Path(roaming) if roaming else Path.home() / "AppData" / "Roaming"
+            international = base / "Trae"
+            chinese = base / "Trae CN"
+            if international.exists() or not chinese.exists():
+                return international
+            return chinese
+        return Path.home() / ".config" / "Trae"
+
+    @classmethod
+    def _agent_dir(cls) -> Path:
+        configured = os.environ.get("TRAE_AGENT_DIR")
+        if configured:
+            return Path(configured).expanduser()
+        return cls._home() / "ModularData" / "ai-agent"
+
+    @classmethod
+    def _database_path(cls) -> Path:
+        return cls._agent_dir() / "database.db"
+
+    def _candidate(
+        self,
+        *,
+        session_id: str,
+        path: Path,
+        title: str | None,
+        cwd: str | None,
+        created_ms: int | None,
+        updated_ms: int,
+        session_type: str | None,
+        parent_id: str | None,
+        store: str,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "tool": "trae",
+            "source": "trae",
+            "store": store,
+            "session_id": core._safe_text(session_id),
+            "path": str(path),
+            "title": core._safe_text(title) if title else None,
+            "cwd": core._safe_text(cwd) if cwd else None,
+            "branch": None,
+            "created_at": core._iso_from_millis(created_ms),
+            "updated_at_ms": updated_ms,
+            "updated_at": core._iso_from_millis(updated_ms),
+            "source_repo_root_path": None,
+            "model": core._safe_text(model) if model else None,
+            "task_type": core._safe_text(session_type) if session_type else None,
+            "parent_session": core._safe_text(parent_id) if parent_id else None,
+        }
+
+    def _project_paths(
+        self,
+        database: sqlite3.Connection,
+        columns: dict[str, set[str]],
+        session_id: str,
+        project_id: str | None,
+    ) -> list[str]:
+        paths: list[str] = []
+        if "project" in columns:
+            project_cols = columns["project"]
+            selected = [name for name in ("project_id", "absolute_path") if name in project_cols]
+            if "absolute_path" in project_cols:
+                rows: list[sqlite3.Row] = []
+                if "session_project" in columns and "session_id" in columns["session_project"]:
+                    rows = database.execute(
+                        "SELECT p.absolute_path AS absolute_path FROM session_project sp "
+                        "JOIN project p ON p.project_id = sp.project_id "
+                        "WHERE sp.session_id = ?",
+                        (session_id,),
+                    ).fetchall()
+                if not rows and project_id:
+                    rows = database.execute(
+                        f"SELECT {', '.join(selected)} FROM project WHERE project_id = ?",
+                        (project_id,),
+                    ).fetchall()
+                for row in rows:
+                    value = _row_value(row, "absolute_path")
+                    if isinstance(value, str) and value.strip():
+                        paths.append(value)
+        if "multi_root_path" in columns and "root_absolute_path" in columns["multi_root_path"]:
+            for row in database.execute(
+                "SELECT root_absolute_path FROM multi_root_path WHERE deleted_at IS NULL"
+                if "deleted_at" in columns["multi_root_path"]
+                else "SELECT root_absolute_path FROM multi_root_path"
+            ).fetchall():
+                value = _row_value(row, "root_absolute_path")
+                if isinstance(value, str) and value.strip():
+                    paths.append(value)
+        return list(dict.fromkeys(paths))
+
+    def _sqlite_candidates(
+        self,
+        database: sqlite3.Connection,
+        path: Path,
+        columns: dict[str, set[str]],
+        *,
+        include_subagents: bool,
+    ) -> list[dict[str, Any]]:
+        selected = _selected_columns(
+            columns["chat_session"],
+            _TRAE_REQUIRED_COLUMNS["chat_session"],
+            _TRAE_SESSION_OPTIONAL,
+        )
+        rows = database.execute(
+            f"SELECT {', '.join(selected)} FROM chat_session ORDER BY updated_at, session_id"
+        ).fetchall()
+        sessions: list[dict[str, Any]] = []
+        for row in rows:
+            if _trae_hidden_session(row):
+                continue
+            payload = _session_payload(row)
+            if not include_subagents and _trae_is_subagent(row, payload):
+                continue
+            session_id = _row_value(row, "session_id")
+            if not isinstance(session_id, str) or not session_id:
+                continue
+            project_id = _session_text(row, payload, "project_id")
+            directories = self._project_paths(database, columns, session_id, project_id)
+            created_ms = core._timestamp_to_millis(_row_value(row, "created_at"))
+            updated_ms = core._timestamp_to_millis(_row_value(row, "updated_at")) or created_ms or 0
+            sessions.append(
+                self._candidate(
+                    session_id=session_id,
+                    path=path,
+                    title=_session_text(row, payload, "session_title", "title"),
+                    cwd=directories[0] if directories else None,
+                    created_ms=created_ms,
+                    updated_ms=updated_ms,
+                    session_type=_session_text(row, payload, "session_type"),
+                    parent_id=None,
+                    store="sqlite",
+                )
+            )
+            if directories:
+                sessions[-1]["_cwd_aliases"] = directories
+        return sessions
+
+    def _matches_cwd(self, candidate: dict[str, Any], cwd: str) -> bool:
+        aliases = candidate.get("_cwd_aliases")
+        if isinstance(aliases, list) and any(_same_cwd(item, cwd) for item in aliases):
+            return True
+        return _same_cwd(candidate.get("cwd"), cwd)
+
+    def discover(self, cwd: str, within_min: int) -> list[dict[str, Any]]:
+        self.warnings = []
+        self._request_cwd = cwd
+        path = self._database_path()
+        if path.is_symlink():
+            core._add_warning(
+                self.warnings,
+                "sqlite_store_skipped",
+                f"Trae sqlite path is a symlink and was not followed: {path}",
+            )
+            return []
+        if not path.is_file():
+            return []
+        with _trae_database(path) as database:
+            columns, warnings = _require_trae_schema(database, path)
+            self.warnings.extend(warnings)
+            if not path.read_bytes().startswith(b"SQLite format 3\x00"):
+                core._add_warning(
+                    self.warnings,
+                    "sqlcipher_snapshot",
+                    "Opened a private SQLCipher 4 snapshot of ModularData/ai-agent/database.db; Trae was not revived.",
+                )
+            sessions = [
+                candidate
+                for candidate in self._sqlite_candidates(
+                    database,
+                    path,
+                    columns,
+                    include_subagents=False,
+                )
+                if self._matches_cwd(candidate, cwd)
+                and core._within(int(candidate.get("updated_at_ms") or 0), within_min)
+            ]
+        return core._sort_and_dedupe(sessions)
+
+    def candidate_from_path(self, raw_path: str, cwd: str) -> dict[str, Any] | None:
+        self._request_cwd = cwd
+        path = Path(raw_path).expanduser()
+        if not path.is_file() or path.is_symlink():
+            return None
+        if path.name not in {"database.db", "db.sqlite"} and path.suffix not in {".db", ".sqlite"}:
+            return None
+        try:
+            with _trae_database(path) as database:
+                columns, _warnings = _require_trae_schema(database, path)
+                found = [
+                    candidate
+                    for candidate in self._sqlite_candidates(
+                        database,
+                        path,
+                        columns,
+                        include_subagents=True,
+                    )
+                    if self._matches_cwd(candidate, cwd) or not candidate.get("cwd")
+                ]
+        except core.ReaderError:
+            return None
+        if len(found) == 1:
+            return found[0]
+        if len(found) > 1:
+            raise core.AmbiguousReference(raw_path, found)
+        return None
+
+    def find_id(self, session_id: str, cwd: str) -> dict[str, Any] | None:
+        self._request_cwd = cwd
+        path = self._database_path()
+        if not path.is_file() or path.is_symlink():
+            return None
+        with _trae_database(path) as database:
+            columns, _warnings = _require_trae_schema(database, path)
+            matches = [
+                candidate
+                for candidate in self._sqlite_candidates(
+                    database,
+                    path,
+                    columns,
+                    include_subagents=True,
+                )
+                if str(candidate.get("session_id", "")).casefold() == session_id.casefold()
+            ]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise core.AmbiguousReference(session_id, matches)
+        return None
+
+    def _message_content(
+        self,
+        database: sqlite3.Connection,
+        columns: dict[str, set[str]],
+        message_id: str,
+    ) -> Any:
+        for table, field in (
+            ("chat_message_chat", "content"),
+            ("chat_message_general", "content"),
+            ("chat_message_task", "content"),
+        ):
+            if table not in columns or field not in columns[table]:
+                continue
+            row = database.execute(
+                f"SELECT {field} FROM {table} WHERE message_id = ? ORDER BY rowid LIMIT 1",
+                (message_id,),
+            ).fetchone()
+            if row is not None and _row_value(row, field) not in (None, ""):
+                return _row_value(row, field)
+        return None
+
+    def _load_messages(
+        self,
+        database: sqlite3.Connection,
+        columns: dict[str, set[str]],
+        session_id: str,
+    ) -> tuple[list[tuple[str, dict[str, Any], list[dict[str, Any]], int | None]], int]:
+        message_cols = columns.get("chat_message", set())
+        selected = _selected_columns(
+            message_cols,
+            ("session_id", "message_id"),
+            ("message_type", "message_role", "message_index", "is_archived", "deleted_at", "created_at", "user_message_context"),
+        )
+        order = "message_index, created_at, rowid" if "message_index" in message_cols else "rowid"
+        rows = database.execute(
+            f"SELECT {', '.join(selected)} FROM chat_message WHERE session_id = ? ORDER BY {order}",
+            (session_id,),
+        ).fetchall()
+        messages: list[tuple[str, dict[str, Any], list[dict[str, Any]], int | None]] = []
+        malformed = 0
+        for row in rows:
+            if _row_value(row, "deleted_at") not in (None, "", 0):
+                continue
+            if _row_value(row, "is_archived") in (1, True, "1"):
+                continue
+            message_id = _row_value(row, "message_id")
+            role = _row_value(row, "message_role")
+            if not isinstance(message_id, str) or role not in {"user", "assistant"}:
+                malformed += 1
+                continue
+            raw = self._message_content(database, columns, message_id)
+            parts = [{"type": "text", "text": raw}] if isinstance(raw, str) else [{"type": "json", "content": raw}]
+            created = core._timestamp_to_millis(_row_value(row, "created_at"))
+            messages.append((role, {"role": role, "message_id": message_id}, parts, created))
+        return messages, malformed
+
+    def _load_tools(
+        self,
+        database: sqlite3.Connection,
+        columns: dict[str, set[str]],
+        session_id: str,
+        max_tool_chars: int,
+        warnings: list[dict[str, str]],
+    ) -> tuple[list[tuple[int, dict[str, Any], dict[str, Any] | None]], int]:
+        hidden = 0
+        tools: list[tuple[int, dict[str, Any], dict[str, Any] | None]] = []
+        if "toolcall" in columns and "agent_run" in columns:
+            rows = database.execute(
+                """
+                SELECT t.toolcall_id, t.name, t.status, t.params, t.result, t.created_at, r.parent_run_id
+                FROM toolcall t
+                JOIN agent_run r ON r.agent_run_id = t.agent_run_id
+                WHERE r.session_id = ?
+                ORDER BY t.created_at, t.rowid
+                """,
+                (session_id,),
+            ).fetchall()
+            for index, row in enumerate(rows):
+                if _row_value(row, "parent_run_id") not in (None, ""):
+                    continue
+                call, result = _trae_tool_record(
+                    _row_value(row, "name"),
+                    _parse_data_object(_row_value(row, "params")) or _row_value(row, "params"),
+                    _parse_data_object(_row_value(row, "result")) or _row_value(row, "result"),
+                    _row_value(row, "status"),
+                    _row_value(row, "toolcall_id"),
+                    index,
+                    max_tool_chars,
+                )
+                created = core._timestamp_to_millis(_row_value(row, "created_at")) or index
+                tools.append((created, call, result))
+        return tools, hidden
+
+    def _history_compaction(
+        self,
+        database: sqlite3.Connection,
+        columns: dict[str, set[str]],
+        session_id: str,
+        warnings: list[dict[str, str]],
+    ) -> list[dict[str, Any]]:
+        summaries: list[dict[str, Any]] = []
+        if "history_v2" not in columns:
+            return summaries
+        rows = database.execute(
+            "SELECT summary, micro_compacted, summarized_above FROM history_v2 "
+            "WHERE session_id = ? AND (micro_compacted = 1 OR summarized_above = 1 OR summary IS NOT NULL)",
+            (session_id,),
+        ).fetchall()
+        count = 0
+        for row in rows:
+            if _row_value(row, "micro_compacted") not in (1, True, "1") and _row_value(row, "summarized_above") not in (1, True, "1"):
+                if not _row_value(row, "summary"):
+                    continue
+            count += 1
+            summary = _row_value(row, "summary")
+            summaries.append(
+                {
+                    "kind": "compaction",
+                    "content": core._safe_text(summary)
+                    if isinstance(summary, str) and summary.strip()
+                    else "Trae history was compacted. Older rows still in the database were kept.",
+                    "inert": True,
+                }
+            )
+        if count:
+            core._add_warning(
+                warnings,
+                "compaction_summary",
+                (
+                    f"Surfaced {count} Trae compaction marker(s) as summary markers. "
+                    "Older rows still present in the database were kept."
+                ),
+            )
+        return summaries
+
+    def read(self, candidate: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
+        path = Path(str(candidate["path"]))
+        session_id = str(candidate.get("session_id") or "")
+        request_cwd = self._request_cwd
+        with _trae_database(path) as database:
+            columns, schema_warnings = _require_trae_schema(database, path)
+            messages, malformed = self._load_messages(database, columns, session_id)
+            tools, hidden_tools = self._load_tools(database, columns, session_id, max_tool_chars, schema_warnings)
+            summaries = self._history_compaction(database, columns, session_id, schema_warnings)
+        warnings = list(schema_warnings)
+        if not path.read_bytes().startswith(b"SQLite format 3\x00"):
+            core._add_warning(
+                warnings,
+                "sqlcipher_snapshot",
+                "Opened a private SQLCipher 4 snapshot of ModularData/ai-agent/database.db; Trae was not revived.",
+            )
+        turns: list[dict[str, Any]] = []
+        hidden = hidden_tools
+        for role, _payload, parts, _created in messages:
+            texts: list[str] = []
+            for part in parts:
+                raw = part.get("text") if part.get("type") == "text" else part.get("content")
+                text, skipped = _trae_parse_content(raw, warnings)
+                hidden += skipped
+                if text:
+                    texts.append(text)
+            text = "\n".join(texts)
+            if text:
+                turns.append(core._turn(role, text=text))
+        if tools:
+            calls = [item[1] for item in tools]
+            results = [item[2] for item in tools if item[2] is not None]
+            if calls:
+                turns.append(core._turn("assistant", tool_calls=calls))
+            if results:
+                turns.append(core._turn("tool", tool_results=results))
+        if malformed:
+            core._add_warning(
+                warnings,
+                "malformed_records_skipped",
+                f"Skipped {malformed} malformed Trae message row(s).",
+            )
+        if hidden:
+            core._add_warning(
+                warnings,
+                "hidden_reasoning_skipped",
+                f"Excluded {hidden} Trae reasoning or thinking part(s).",
+            )
+        session_cwd = candidate.get("cwd")
+        if (
+            request_cwd
+            and isinstance(session_cwd, str)
+            and session_cwd
+            and not _same_cwd(session_cwd, request_cwd)
+        ):
+            core._add_warning(
+                warnings,
+                "cwd_mismatch",
+                f"Foreign Trae cwd {session_cwd} does not match the current DSH workspace {request_cwd}.",
+            )
+        if not candidate.get("title"):
+            title = next(
+                (
+                    core._one_line(turn.get("text"), 120)
+                    for turn in turns
+                    if turn.get("role") == "user" and turn.get("text")
+                ),
+                None,
+            )
+        else:
+            title = candidate.get("title")
+        result = {
+            "tool": "trae",
+            "source": "trae",
+            "session_id": session_id,
+            "path": str(path),
+            "title": title,
+            "cwd": session_cwd,
+            "branch": None,
+            "created_at": candidate.get("created_at"),
+            "updated_at": candidate.get("updated_at"),
+            "source_repo_root_path": None,
+            "model": candidate.get("model"),
+            "task_type": candidate.get("task_type"),
+            "parent_session": candidate.get("parent_session"),
+            "turns": turns,
+            "summaries": summaries,
+            "warnings": warnings,
+        }
+        return core._finalize_result(result)
+
+
 ADAPTERS: dict[str, ProviderAdapter] = {
     "grok": GrokAdapter(),
     "pi": PiAdapter(),
     "zcode": ZCodeAdapter(),
+    "trae": TraeAdapter(),
 }
 
 
