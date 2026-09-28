@@ -46,6 +46,13 @@ export const RESUME_SKILL_SPECS = [
     recoveryBoundary: 'The reader follows Pi\'s current active leaf only and excludes thinking, hooks, system messages, and extension-injected records.',
   },
   {
+    name: 'resume-qoder',
+    provider: 'qoder',
+    product: 'Qoder',
+    description: '继续当前工作目录中的 Qoder 会话；可附会话 ID、记录路径或标题关键词。',
+    recoveryBoundary: 'The reader uses Qoder transcript JSONL under projects/ in QODER_CONFIG_DIR (or ~/.qoder, QODER_HOME alias) plus the IDE SharedClientCache/cli/projects root. It never reads encrypted state.json siblings, logs/sessions run logs, .auth credentials, or settings.json, and skips isSidechain subagent records and hidden reasoning.',
+  },
+  {
     name: 'resume-zcode',
     provider: 'zcode',
     product: 'ZCode',
@@ -54,7 +61,7 @@ export const RESUME_SKILL_SPECS = [
   },
 ] as const satisfies readonly ResumeSkillSpec[]
 
-/** One source of truth for all six user-only slash skills. */
+/** One source of truth for all user-only slash skills. */
 export function skillRegistration(spec: ResumeSkillSpec): SkillRegistration {
   return {
     name: spec.name,
