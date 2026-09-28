@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extend Grok's foreign-session reader with inert Grok, Pi, and ZCode adapters."""
+"""Extend Grok's foreign-session reader with inert Grok, Pi, ZCode, and Qoder adapters."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 
-EXTENDED_TOOLS = ("grok", "pi", "zcode")
+EXTENDED_TOOLS = ("grok", "pi", "qoder", "zcode")
 TOOLS = (*core.TOOLS, *EXTENDED_TOOLS)
 
 
@@ -1739,9 +1739,423 @@ class ZCodeAdapter(ProviderAdapter):
         return self._read_sqlite(candidate, max_tool_chars)
 
 
+_QODER_INFORMATIONAL_TYPES = {
+    "runtime-config",
+    "file-history-snapshot",
+    "last-prompt",
+    # Housekeeping records emitted by qodercli: injected context listings,
+    # leaf tracking, workspace metadata, and worktree state. Known and
+    # intentionally not rendered — attachment content is Qoder-injected
+    # context, not user/assistant turns.
+    "attachment",
+    "active-leaf",
+    "workspace-directories",
+    "worktree-state",
+}
+_QODER_KNOWN_TYPES = set(core.CLAUDE_KNOWN_TYPES) | _QODER_INFORMATIONAL_TYPES
+
+_QODER_MESSAGE_TYPES = {"user", "assistant", "system"}
+
+
+def _qoder_message_eligible(record: dict[str, Any]) -> bool:
+    return (
+        record.get("type") in _QODER_MESSAGE_TYPES
+        and not record.get("isSidechain")
+        and isinstance(record.get("uuid"), str)
+        and bool(record.get("uuid"))
+    )
+
+
+def _repair_qoder_parents(records: list[dict[str, Any]]) -> None:
+    """Repoint message parent links that cross non-message records.
+
+    qodercli interleaves housekeeping records (``attachment``, ``active-leaf``,
+    ...) inside the parentUuid chain, so an assistant's parentUuid can point at
+    a record that is filtered out before rendering. Walk each message record's
+    chain through those non-message records to the nearest message ancestor so
+    no turns (notably the opening user prompt) are orphaned.
+    """
+    by_uuid = {
+        record["uuid"]: record
+        for record in records
+        if isinstance(record.get("uuid"), str) and record["uuid"]
+    }
+    for record in records:
+        if not _qoder_message_eligible(record):
+            continue
+        parent = core._claude_parent(record)
+        if parent is None or parent not in by_uuid:
+            continue
+        seen: set[str] = {str(record.get("uuid"))}
+        resolved = parent
+        while resolved is not None and resolved in by_uuid:
+            target = by_uuid[resolved]
+            if _qoder_message_eligible(target):
+                break
+            if resolved in seen:
+                resolved = None
+                break
+            seen.add(resolved)
+            resolved = core._claude_parent(target)
+        if resolved != parent:
+            core._set_claude_parent(record, resolved)
+
+
+def _qoder_workspace_dir(records: list[dict[str, Any]]) -> str | None:
+    for record in records:
+        if record.get("type") != "workspace-directories":
+            continue
+        directories = record.get("directories")
+        if isinstance(directories, list):
+            value = next(
+                (
+                    item
+                    for item in directories
+                    if isinstance(item, str) and item.strip()
+                ),
+                None,
+            )
+            if value:
+                return value
+    return None
+
+
+def _qoder_ide_roots() -> list[Path]:
+    """Qoder IDE SharedClientCache transcript roots (flat layout, same JSONL schema)."""
+    configured = os.environ.get("QODER_IDE_CACHE_DIR")
+    if configured:
+        return [Path(configured).expanduser()]
+    home = Path.home()
+    candidates = [
+        home / "Library/Application Support/Qoder/SharedClientCache/cli/projects",
+        home / ".config/Qoder/SharedClientCache/cli/projects",
+    ]
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.append(Path(appdata) / "Qoder/SharedClientCache/cli/projects")
+    output: list[Path] = []
+    for path in candidates:
+        if path not in output:
+            output.append(path)
+    return output
+
+
+class QoderAdapter(ProviderAdapter):
+    """Read Qoder's Claude-Code-shaped JSONL transcripts as inert history.
+
+    Primary store: ``$QODER_CONFIG_DIR/projects/<slug>/<session-id>.jsonl``
+    (default ``~/.qoder``; ``QODER_HOME`` is accepted as a fallback alias).
+    Qoder IDE ``SharedClientCache/cli/projects`` transcripts are a second,
+    flat-layout root (overridable with ``QODER_IDE_CACHE_DIR``). Every record
+    carries ``cwd``/``gitBranch``; ``isSidechain`` subagent records and
+    informational ``runtime-config``/``file-history-snapshot``/``last-prompt``
+    records are skipped. The encrypted ``<session-id>/state.json`` siblings,
+    ``logs/sessions`` run logs, ``.auth`` credentials, and ``settings.json``
+    are never read.
+    """
+
+    tool = "qoder"
+
+    @staticmethod
+    def _home() -> Path:
+        configured = os.environ.get("QODER_CONFIG_DIR") or os.environ.get("QODER_HOME")
+        return Path(configured).expanduser() if configured else Path.home() / ".qoder"
+
+    @classmethod
+    def _projects_root(cls) -> Path:
+        return cls._home() / "projects"
+
+    def _iter_transcripts(self) -> Iterable[tuple[Path, str]]:
+        root = self._projects_root()
+        if root.is_dir() and not root.is_symlink():
+            try:
+                buckets = sorted(root.iterdir(), key=lambda item: item.name)
+            except OSError:
+                buckets = []
+            for bucket in buckets:
+                if not bucket.is_dir() or bucket.is_symlink():
+                    continue
+                try:
+                    children = sorted(bucket.iterdir(), key=lambda item: item.name)
+                except OSError:
+                    continue
+                for child in children:
+                    if child.is_file() and not child.is_symlink() and child.suffix == ".jsonl":
+                        yield child, "qoder-cli"
+        for ide_root in _qoder_ide_roots():
+            if not ide_root.is_dir() or ide_root.is_symlink():
+                continue
+            try:
+                children = sorted(ide_root.iterdir(), key=lambda item: item.name)
+            except OSError:
+                continue
+            for child in children:
+                if child.is_file() and not child.is_symlink() and child.suffix == ".jsonl":
+                    yield child, "qoder-ide-cache"
+
+    def _file_candidate(
+        self,
+        path: Path,
+        source: str,
+        cwd: str,
+        *,
+        require_cwd: bool,
+        slug_matches: bool = False,
+    ) -> dict[str, Any] | None:
+        try:
+            records, _malformed = core._read_plain_jsonl(path)
+        except core.ReaderError as exc:
+            core._add_warning(
+                self.warnings,
+                "transcript_unreadable",
+                f"Skipped unreadable Qoder transcript {path}: {exc}",
+            )
+            return None
+        session_id: str | None = None
+        actual_cwd: str | None = None
+        branch: str | None = None
+        has_turns = False
+        timestamps: list[int] = []
+        for record in records:
+            if session_id is None:
+                value = record.get("sessionId")
+                if isinstance(value, str) and value.strip():
+                    session_id = value
+            if actual_cwd is None:
+                value = record.get("cwd")
+                if isinstance(value, str) and value.strip():
+                    actual_cwd = value
+            value = record.get("gitBranch")
+            if isinstance(value, str) and value.strip():
+                branch = value
+            if record.get("type") in {"user", "assistant"} and isinstance(
+                record.get("message"), dict
+            ):
+                has_turns = True
+            stamp = core._timestamp_to_millis(record.get("timestamp"))
+            if stamp is not None:
+                timestamps.append(stamp)
+        if actual_cwd is None:
+            actual_cwd = _qoder_workspace_dir(records)
+        if not has_turns:
+            return None
+        if require_cwd and not _same_cwd(actual_cwd, cwd) and not slug_matches:
+            return None
+        if actual_cwd is None and slug_matches:
+            actual_cwd = cwd
+        if session_id is None:
+            session_id = path.stem
+        title = core._claude_title(records, [])
+        if title is None:
+            title = next(
+                (
+                    core._one_line(text, 200)
+                    for record in records
+                    if record.get("type") == "user" and not record.get("isSidechain")
+                    for text in [
+                        core._content_text(
+                            (record.get("message") or {}).get("content")
+                            if isinstance(record.get("message"), dict)
+                            else None
+                        )
+                    ]
+                    if text.strip()
+                ),
+                None,
+            )
+        updated_ms = timestamps[-1] if timestamps else core._mtime_millis(path)
+        return {
+            "tool": "qoder",
+            "source": source,
+            "store": "projects" if source == "qoder-cli" else "ide-cache",
+            "session_id": core._safe_text(session_id),
+            "path": str(path),
+            "title": core._safe_text(title) if title else None,
+            "cwd": core._safe_text(actual_cwd) if actual_cwd else None,
+            "branch": core._safe_text(branch) if branch else None,
+            "created_at": core._iso_from_millis(timestamps[0] if timestamps else None),
+            "updated_at_ms": updated_ms,
+            "updated_at": core._iso_from_millis(updated_ms),
+            "source_repo_root_path": None,
+        }
+
+    def discover(self, cwd: str, within_min: int) -> list[dict[str, Any]]:
+        self.warnings = []
+        expected_slug = core.slugify(cwd)
+        sessions: list[dict[str, Any]] = []
+        for path, source in self._iter_transcripts():
+            slug_matches = source == "qoder-cli" and path.parent.name == expected_slug
+            candidate = self._file_candidate(
+                path, source, cwd, require_cwd=True, slug_matches=slug_matches
+            )
+            if candidate is None:
+                continue
+            if core._within(int(candidate.get("updated_at_ms") or 0), within_min):
+                sessions.append(candidate)
+        return core._sort_and_dedupe(sessions)
+
+    def candidate_from_path(self, raw_path: str, cwd: str) -> dict[str, Any] | None:
+        path = Path(raw_path).expanduser()
+        if not path.is_file() or path.is_symlink() or path.suffix != ".jsonl":
+            return None
+        ide = any(path.parent == root for root in _qoder_ide_roots())
+        candidate = self._file_candidate(
+            path, "qoder-ide-cache" if ide else "qoder-cli", cwd, require_cwd=False
+        )
+        if candidate is not None:
+            candidate["requested_cwd"] = cwd
+        return candidate
+
+    def find_id(self, session_id: str, cwd: str) -> dict[str, Any] | None:
+        wanted = session_id.casefold()
+        matches: list[dict[str, Any]] = []
+        deferred: list[tuple[Path, str]] = []
+        for path, source in self._iter_transcripts():
+            if path.stem.casefold() == wanted:
+                candidate = self._file_candidate(path, source, cwd, require_cwd=False)
+                if candidate is not None:
+                    candidate["requested_cwd"] = cwd
+                    matches.append(candidate)
+            else:
+                deferred.append((path, source))
+        if not matches:
+            for path, source in deferred:
+                candidate = self._file_candidate(path, source, cwd, require_cwd=False)
+                if candidate is None:
+                    continue
+                if str(candidate.get("session_id", "")).casefold() == wanted:
+                    candidate["requested_cwd"] = cwd
+                    matches.append(candidate)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise core.AmbiguousReference(session_id, matches)
+        return None
+
+    def read(self, candidate: dict[str, Any], max_tool_chars: int) -> dict[str, Any]:
+        path = Path(str(candidate["path"])).expanduser()
+        records, malformed = core._read_plain_jsonl(path)
+        warnings: list[dict[str, str]] = []
+        if malformed:
+            core._add_warning(
+                warnings,
+                "malformed_records_skipped",
+                f"Skipped {malformed} malformed Qoder transcript record(s).",
+            )
+        unknown = sum(
+            1
+            for record in records
+            if isinstance(record.get("type"), str) and record.get("type") not in _QODER_KNOWN_TYPES
+        )
+        if unknown:
+            core._add_warning(
+                warnings,
+                "unknown_records_skipped",
+                f"Skipped {unknown} unknown Qoder record(s) without interpreting their payloads.",
+            )
+        sidechain = sum(1 for record in records if record.get("isSidechain"))
+        if sidechain:
+            core._add_warning(
+                warnings,
+                "sidechain_records_skipped",
+                f"Skipped {sidechain} Qoder subagent (isSidechain) record(s).",
+            )
+        _repair_qoder_parents(records)
+        messages = core._prepare_claude_messages(records, warnings)
+        leaf = core._claude_leaf(messages, warnings)
+        chain: list[dict[str, Any]] = []
+        if leaf is not None:
+            chain, _seen = core._claude_chain(messages, leaf, warnings)
+        replacements = core._claude_replacement_ids(records)
+        turns = [
+            turn
+            for record in chain
+            for turn in [core._render_claude_record(record, max_tool_chars, replacements)]
+            if turn is not None
+        ]
+        metadata_records = chain if chain else records
+        cwd = next(
+            (
+                record.get("cwd")
+                for record in metadata_records
+                if isinstance(record.get("cwd"), str) and record["cwd"].strip()
+            ),
+            None,
+        ) or _qoder_workspace_dir(records) or (
+            candidate.get("cwd") if isinstance(candidate.get("cwd"), str) else None
+        )
+        requested = candidate.get("requested_cwd")
+        if (
+            isinstance(requested, str)
+            and requested
+            and isinstance(cwd, str)
+            and not _same_cwd(cwd, requested)
+        ):
+            core._add_warning(
+                warnings,
+                "foreign_cwd_mismatch",
+                f"Qoder session cwd {cwd} differs from the current workspace {requested}.",
+            )
+        branch = next(
+            (
+                record.get("gitBranch")
+                for record in reversed(metadata_records)
+                if isinstance(record.get("gitBranch"), str) and record["gitBranch"].strip()
+            ),
+            None,
+        ) or (candidate.get("branch") if isinstance(candidate.get("branch"), str) else None)
+        model = next(
+            (
+                value
+                for record in reversed(records)
+                if record.get("type") == "assistant"
+                for value in [
+                    (record.get("message") or {}).get("model")
+                    if isinstance(record.get("message"), dict)
+                    else None
+                ]
+                if isinstance(value, str) and value.strip()
+            ),
+            None,
+        )
+        timestamps = [
+            stamp
+            for record in chain
+            for stamp in [core._timestamp_to_millis(record.get("timestamp"))]
+            if stamp is not None
+        ]
+        title = candidate.get("title") or core._claude_title(records, turns)
+        session_id = candidate.get("session_id") or path.stem
+        result = {
+            "tool": "qoder",
+            "source": str(candidate.get("source") or "qoder-cli"),
+            "session_id": core._safe_text(session_id),
+            "path": str(path),
+            "title": title,
+            "cwd": cwd,
+            "branch": branch,
+            "created_at": (
+                core._iso_from_millis(timestamps[0])
+                if timestamps
+                else candidate.get("created_at")
+            ),
+            "updated_at": (
+                core._iso_from_millis(timestamps[-1])
+                if timestamps
+                else candidate.get("updated_at") or core._iso_from_millis(core._mtime_millis(path))
+            ),
+            "source_repo_root_path": None,
+            "model": core._safe_text(model) if model else None,
+            "turns": turns,
+            "warnings": warnings,
+        }
+        return core._finalize_result(result)
+
+
 ADAPTERS: dict[str, ProviderAdapter] = {
     "grok": GrokAdapter(),
     "pi": PiAdapter(),
+    "qoder": QoderAdapter(),
     "zcode": ZCodeAdapter(),
 }
 
