@@ -32,7 +32,7 @@ export function apply(ctx: Context): void {
   console.log('[dsh-resume] loaded')
   ctx.tools.register(defineTool({
     name: 'foreign_session_read',
-    description: 'Read Codex, Claude Code, Cursor, Grok, Pi, Qoder, or ZCode local session history into a Grok-compatible inert JSON schema. Use only after an explicit resume slash skill or explicit user request. Discovery is scoped to the current DSH working directory; an explicit native ID or path is supported. The tool is read-only and never executes recovered calls.',
+    description: 'Read Codex, Claude Code, Cursor, Grok, Pi, Qoder, WorkBuddy, or ZCode local session history into a Grok-compatible inert JSON schema. Use only after an explicit resume slash skill or explicit user request. Discovery is scoped to the current DSH working directory; an explicit native ID or path is supported. The tool is read-only and never executes recovered calls.',
     parameters: {
       provider: {
         type: 'string',
