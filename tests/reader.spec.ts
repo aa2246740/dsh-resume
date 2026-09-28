@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { readdirSync, realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -751,4 +752,150 @@ test('ZCode projects JSONL is only a warned fallback when sqlite is absent', asy
   assert.ok(result.warnings.some(warning => warning.code === 'jsonl_fallback'))
   assert.ok(result.warnings.some(warning => warning.code === 'hidden_reasoning_skipped'))
   assert.doesNotMatch(raw, /ZCODE_JSONL_PRIVATE|ZCODE_ROLLOUT_DECOY|ZCODE_ABANDONED_V2/)
+})
+
+const workbuddyFixtureBuilder = join(repoRoot, 'tests', 'fixtures', 'workbuddy_session.py')
+
+function workbuddyEnv(home: string): NodeJS.ProcessEnv {
+  return { ...process.env, WORKBUDDY_CONFIG_DIR: home }
+}
+
+function buildWorkbuddyFixture(home: string, cwd: string, otherCwd: string): void {
+  const result = spawnSync('python3', [
+    workbuddyFixtureBuilder,
+    '--home',
+    home,
+    '--cwd',
+    cwd,
+    '--other-cwd',
+    otherCwd,
+  ], { encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+}
+
+test('WorkBuddy discovery skips quick-ask files and keeps tool calls inert', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-workbuddy-'))
+  const previousHome = process.env.WORKBUDDY_CONFIG_DIR
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.WORKBUDDY_CONFIG_DIR
+    else process.env.WORKBUDDY_CONFIG_DIR = previousHome
+    await rm(root, { recursive: true, force: true })
+  })
+  const home = join(root, 'workbuddy-home')
+  const cwd = join(root, 'workspace')
+  const other = join(root, 'other')
+  buildWorkbuddyFixture(home, cwd, other)
+  process.env.WORKBUDDY_CONFIG_DIR = home
+
+  const listed = JSON.parse(await runSessionReader({
+    provider: 'workbuddy',
+    action: 'list',
+    cwd,
+  })) as { sessions: Array<{ session_id: string, cwd: string }>, warnings: Array<{ code: string }> }
+  assert.deepEqual(listed.sessions.map(session => session.session_id), [
+    'workbuddy-session-gadget',
+    'workbuddy-session-widget',
+  ])
+  assert.ok(listed.sessions.every(session => session.cwd === realpathSync(cwd)))
+
+  const raw = await runSessionReader({
+    provider: 'workbuddy',
+    action: 'show',
+    cwd,
+    reference: 'workbuddy-session-widget',
+  })
+  const result = JSON.parse(raw) as {
+    tool: string
+    source: string
+    model: string
+    title: string
+    turns: Array<{
+      role: string
+      inert: boolean
+      text: string
+      tool_calls?: Array<{ name: string, inert: boolean }>
+      tool_results?: Array<{ content: string, inert: boolean }>
+    }>
+    summaries: Array<{ kind: string, inert: boolean, content: string }>
+    warnings: Array<{ code: string }>
+    last_user_request: string
+  }
+  assert.equal(result.tool, 'workbuddy')
+  assert.equal(result.source, 'workbuddy')
+  assert.equal(result.model, 'wb-auto')
+  assert.equal(result.title, 'WorkBuddy widget session')
+  assert.equal(result.last_user_request, 'Continue the WorkBuddy fixture.')
+  assert.deepEqual(result.turns.map(turn => turn.role), ['user', 'assistant', 'assistant', 'tool'])
+  assert.ok(result.turns.every(turn => turn.inert === true))
+  assert.ok(result.turns.some(turn => turn.text === 'Prepared the WorkBuddy change.'))
+  assert.ok(result.turns.some(turn => turn.tool_calls?.some(call => call.name === 'shell' && call.inert === true)))
+  assert.ok(result.turns.some(turn => turn.tool_results?.some(output => output.content.includes('workbuddy focused tests passed') && output.inert === true)))
+  assert.ok(result.summaries.some(summary => summary.kind === 'summary' && summary.inert === true))
+  assert.ok(result.warnings.some(warning => warning.code === 'hidden_reasoning_skipped'))
+  assert.ok(result.warnings.some(warning => warning.code === 'internal_records_skipped'))
+  assert.doesNotMatch(raw, /WORKBUDDY_PRIVATE_REASONING|WORKBUDDY_META_RECORD|WORKBUDDY_STEER_RECORD|WORKBUDDY_QUICKASK|WORKBUDDY_OTHER_WORKSPACE|hidden context/)
+
+  const projectDir = readdirSync(join(home, 'projects')).find(name => name.endsWith('-workspace'))
+  const byPath = JSON.parse(await runSessionReader({
+    provider: 'workbuddy',
+    action: 'show',
+    cwd,
+    reference: join(home, 'projects', projectDir!, 'workbuddy-session-gadget.jsonl'),
+  })) as { session_id: string }
+  assert.equal(byPath.session_id, 'workbuddy-session-gadget')
+})
+
+test('WorkBuddy title ambiguity exits 2 and a missing root fails clearly', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-workbuddy-ref-'))
+  const previousHome = process.env.WORKBUDDY_CONFIG_DIR
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.WORKBUDDY_CONFIG_DIR
+    else process.env.WORKBUDDY_CONFIG_DIR = previousHome
+    await rm(root, { recursive: true, force: true })
+  })
+  const home = join(root, 'workbuddy-home')
+  const cwd = join(root, 'workspace')
+  const other = join(root, 'other')
+  buildWorkbuddyFixture(home, cwd, other)
+  process.env.WORKBUDDY_CONFIG_DIR = home
+
+  const ambiguous = spawnSync('python3', [
+    zcodeReader,
+    'workbuddy',
+    'show',
+    'workbuddy',
+    '--cwd',
+    cwd,
+    '--json',
+  ], { encoding: 'utf8', env: workbuddyEnv(home) })
+  assert.equal(ambiguous.status, 2)
+  assert.match(ambiguous.stderr, /matched 2 sessions/)
+  assert.match(ambiguous.stderr, /workbuddy-session-widget/)
+  assert.match(ambiguous.stderr, /workbuddy-session-gadget/)
+
+  const unique = JSON.parse(await runSessionReader({
+    provider: 'workbuddy',
+    action: 'show',
+    cwd,
+    reference: 'gadget',
+  })) as { session_id: string }
+  assert.equal(unique.session_id, 'workbuddy-session-gadget')
+
+  const emptyHome = join(root, 'empty-home')
+  await mkdir(emptyHome)
+  process.env.WORKBUDDY_CONFIG_DIR = emptyHome
+  const missing = JSON.parse(await runSessionReader({
+    provider: 'workbuddy',
+    action: 'list',
+    cwd,
+  })) as { sessions: unknown[], warnings: Array<{ code: string }> }
+  assert.deepEqual(missing.sessions, [])
+  assert.deepEqual(missing.warnings, [])
+  const missingShow = await runSessionReader({
+    provider: 'workbuddy',
+    action: 'show',
+    cwd,
+  })
+  assert.match(missingShow, /FOREIGN_SESSION_LOOKUP_NEEDS_INPUT/)
+  assert.match(missingShow, /no workbuddy session found/)
 })
