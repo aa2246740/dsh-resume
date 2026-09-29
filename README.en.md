@@ -6,7 +6,7 @@ Bring local Codex, Claude Code, Cursor, Grok, Pi, and ZCode session context into
 
 ## Install
 
-**Version 0.2.5 is verified against DeepSeek Harness 0.2.0-rc.1.** Both the package and repository contain compiled plugin files; no Harness source checkout or local build is required. Python 3 is required to read history. Compressed Codex rollouts additionally require `zstd`.
+**Version 0.2.5 is verified against DeepSeek Harness 0.2.0-rc.2.** Both the package and repository contain compiled plugin files; no Harness source checkout or local build is required. Python 3 is required to read history. Compressed Codex rollouts additionally require `zstd`.
 
 ### Official Desktop app
 

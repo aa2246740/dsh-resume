@@ -29,7 +29,7 @@ test('stock dsh plugin add can mount this package as a bundle', () => {
   assert.ok(manifest.keywords?.includes('dsh-plugin'))
 })
 
-test('Harness peer ranges accept 0.2.0-rc.1 and stable 0.2.0 and reject alphas and 0.1.7-rc.2', () => {
+test('Harness peer ranges accept 0.2.0-rc.2 and stable 0.2.0 and reject alphas and 0.1.7-rc.2', () => {
   const skill = manifest.peerDependencies?.['@deepseek-ai/dsh-skill']
   const tools = manifest.peerDependencies?.['@deepseek-ai/dsh-tools']
   const range = '>=0.2.0-rc.1 <0.2.1'
@@ -40,8 +40,8 @@ test('Harness peer ranges accept 0.2.0-rc.1 and stable 0.2.0 and reject alphas a
   assert.equal(semver.satisfies('4.0.4', manifest.peerDependencies?.['@deepseek-ai/cordis']), true)
   for (const spec of [skill, tools]) {
     assert.ok(spec)
-    assert.equal(semver.satisfies('0.2.0-rc.1', spec), true)
-    assert.equal(semver.satisfies('0.2.0-rc.1', spec, boot), true)
+    assert.equal(semver.satisfies('0.2.0-rc.2', spec), true)
+    assert.equal(semver.satisfies('0.2.0-rc.2', spec, boot), true)
     assert.equal(semver.satisfies('0.2.0', spec), true)
     assert.equal(semver.satisfies('0.2.0', spec, boot), true)
     assert.equal(semver.satisfies('0.2.0-rc.2', spec), true)
@@ -55,17 +55,17 @@ test('Harness peer ranges accept 0.2.0-rc.1 and stable 0.2.0 and reject alphas a
     assert.equal(semver.satisfies('0.2.1', spec, boot), false)
     assert.equal(semver.satisfies('0.2.1-alpha.1', spec), false)
     assert.equal(semver.satisfies('0.2.1-alpha.1', spec, boot), true)
-    assert.equal(semver.satisfies('0.2.0-rc.1', previous), false)
-    assert.equal(semver.satisfies('0.2.0-rc.1', previous, boot), false)
+    assert.equal(semver.satisfies('0.2.0-rc.2', previous), false)
+    assert.equal(semver.satisfies('0.2.0-rc.2', previous, boot), false)
   }
 })
 
-test('dev dependencies track published Harness 0.2.0-rc.1', () => {
+test('dev dependencies track published Harness 0.2.0-rc.2', () => {
   const dev = manifest.devDependencies ?? {}
   assert.equal(dev['@deepseek-ai/cordis'], '4.0.4')
   const pinned = Object.entries(dev).filter(([name]) => name.startsWith('@deepseek-ai/dsh-'))
   assert.ok(pinned.length > 0)
   for (const [name, version] of pinned) {
-    assert.equal(version, '0.2.0-rc.1', name)
+    assert.equal(version, '0.2.0-rc.2', name)
   }
 })

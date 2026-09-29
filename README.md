@@ -6,7 +6,7 @@
 
 ## 安装
 
-**0.2.5 面向 DeepSeek Harness 0.2.0-rc.1 验证。** 安装包和仓库均包含编译好的插件，无需下载 Harness 源码或自行构建。读取历史需要本机有 Python 3；读取压缩的 Codex rollout 另需 `zstd`。
+**0.2.5 面向 DeepSeek Harness 0.2.0-rc.2 验证。** 安装包和仓库均包含编译好的插件，无需下载 Harness 源码或自行构建。读取历史需要本机有 Python 3；读取压缩的 Codex rollout 另需 `zstd`。
 
 ### 官方桌面端
 
