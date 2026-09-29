@@ -6,28 +6,28 @@ Bring local Codex, Claude Code, Cursor, Grok, Pi, and ZCode session context into
 
 ## Install
 
-**Version 0.2.4 is verified against DeepSeek Harness 0.1.7-rc.2.** Both the package and repository contain compiled plugin files; no Harness source checkout or local build is required. Python 3 is required to read history. Compressed Codex rollouts additionally require `zstd`.
+**Version 0.2.5 is verified against DeepSeek Harness 0.2.0-rc.2.** Both the package and repository contain compiled plugin files; no Harness source checkout or local build is required. Python 3 is required to read history. Compressed Codex rollouts additionally require `zstd`.
 
 ### Official Desktop app
 
 1. Open **Plugins → Add plugin** (under Settings in some versions).
-2. Enter `github:aa2246740/dsh-resume#v0.2.4` in **Package name or address**, then install and enable it.
+2. Enter `github:aa2246740/dsh-resume#v0.2.5` in **Package name or address**, then install and enable it.
 3. Follow the installer's activation instructions. Type `/resume-` in the composer and check that all six commands below appear.
 
-Alternatively, download `dsh-resume-0.2.4.tgz` from the [v0.2.4 Release](https://github.com/aa2246740/dsh-resume/releases/tag/v0.2.4) and enter its absolute path in the same installer. Desktop uses its own profile; do not use Web Host commands to install into Desktop.
+Alternatively, download `dsh-resume-0.2.5.tgz` from the [v0.2.5 Release](https://github.com/aa2246740/dsh-resume/releases/tag/v0.2.5) and enter its absolute path in the same installer. Desktop uses its own profile; do not use Web Host commands to install into Desktop.
 
 ### Web Host
 
 Use the official CLI:
 
 ```sh
-dsh plugin --profile web add github:aa2246740/dsh-resume#v0.2.4
+dsh plugin --profile web add github:aa2246740/dsh-resume#v0.2.5
 ```
 
 Or, from the downloaded archive's directory:
 
 ```sh
-dsh plugin --profile web add ./dsh-resume-0.2.4.tgz
+dsh plugin --profile web add ./dsh-resume-0.2.5.tgz
 ```
 
 The official `dsh` command and pnpm must be available. Node.js must be `^22.19.0` or `>=24.0.0`. Use the existing Web Host's `DSH_HOME`. This only installs into the Web profile, not Desktop. Follow the official installer's activation result. If it requests a restart, exit and reopen the original Host normally; do not start another Host alongside it.
