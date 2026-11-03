@@ -1077,3 +1077,271 @@ test('WorkBuddy title ambiguity exits 2 and a missing root fails clearly', async
   assert.match(missingShow, /FOREIGN_SESSION_LOOKUP_NEEDS_INPUT/)
   assert.match(missingShow, /no workbuddy session found/)
 })
+
+const SYNTHETIC_CREDENTIAL = `sk-proj-VALIDATOR_SYNTHETIC_CREDENTIAL_${'x'.repeat(32)}`
+
+function qoderDirectorySlug(cwd: string): string {
+  return [...cwd].map(char => /[\p{L}\p{N}]/u.test(char) ? char : '-').join('')
+}
+
+function workbuddyDirectorySlug(cwd: string): string {
+  return cwd.replace(/[/\\:]/g, '-').replace(/^-+|-+$/g, '').replace(/-+/g, '-')
+}
+
+function jsonl(records: unknown[]): string {
+  return `${records.map(record => JSON.stringify(record)).join('\n')}\n`
+}
+
+test('Qoder slug fallback does not import an explicit foreign cwd', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-qoder-slug-'))
+  const previousConfig = process.env.QODER_CONFIG_DIR
+  const previousIde = process.env.QODER_IDE_CACHE_DIR
+  t.after(async () => {
+    if (previousConfig === undefined) delete process.env.QODER_CONFIG_DIR
+    else process.env.QODER_CONFIG_DIR = previousConfig
+    if (previousIde === undefined) delete process.env.QODER_IDE_CACHE_DIR
+    else process.env.QODER_IDE_CACHE_DIR = previousIde
+    await rm(root, { recursive: true, force: true })
+  })
+  const requested = join(root, 'project-a')
+  const foreign = join(root, 'project_a')
+  const bare = join(root, 'bare-workspace')
+  assert.equal(qoderDirectorySlug(requested), qoderDirectorySlug(foreign))
+  assert.notEqual(qoderDirectorySlug(requested), qoderDirectorySlug(bare))
+  const home = join(root, 'qoder')
+  process.env.QODER_CONFIG_DIR = home
+  process.env.QODER_IDE_CACHE_DIR = join(root, 'no-ide')
+  const foreignPath = join(home, 'projects', qoderDirectorySlug(requested), 'foreign.jsonl')
+  const barePath = join(home, 'projects', qoderDirectorySlug(bare), 'bare.jsonl')
+  await mkdir(join(foreignPath, '..'), { recursive: true })
+  await mkdir(join(barePath, '..'), { recursive: true })
+  const transcript = (cwd: string | null, sessionId: string) => [
+    {
+      type: 'user',
+      uuid: 'u',
+      parentUuid: null,
+      sessionId,
+      ...(cwd === null ? {} : { cwd }),
+      timestamp: '2026-11-03T00:00:00Z',
+      message: { role: 'user', content: `Continue ${sessionId}.` },
+    },
+    {
+      type: 'assistant',
+      uuid: 'a',
+      parentUuid: 'u',
+      sessionId,
+      ...(cwd === null ? {} : { cwd }),
+      timestamp: '2026-11-03T00:01:00Z',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'Ready.' }] },
+    },
+  ]
+  await writeFile(foreignPath, jsonl(transcript(foreign, 'foreign-project-session')))
+  await writeFile(barePath, jsonl(transcript(null, 'bare-session')))
+
+  const listed = JSON.parse(await runSessionReader({
+    provider: 'qoder',
+    action: 'list',
+    cwd: requested,
+  })) as { sessions: Array<{ session_id: string, cwd: string }> }
+  assert.deepEqual(listed.sessions, [])
+  const latest = await runSessionReader({
+    provider: 'qoder',
+    action: 'show',
+    cwd: requested,
+  })
+  assert.match(latest, /FOREIGN_SESSION_LOOKUP_NEEDS_INPUT/)
+  assert.match(latest, /no qoder session found/)
+  assert.doesNotMatch(latest, /foreign-project-session/)
+
+  const bareListed = JSON.parse(await runSessionReader({
+    provider: 'qoder',
+    action: 'list',
+    cwd: bare,
+  })) as { sessions: Array<{ session_id: string, cwd: string }> }
+  assert.deepEqual(bareListed.sessions.map(session => session.session_id), ['bare-session'])
+  assert.equal(bareListed.sessions[0]?.cwd, bare)
+  const bareShown = JSON.parse(await runSessionReader({
+    provider: 'qoder',
+    action: 'show',
+    cwd: bare,
+  })) as { session_id: string, cwd: string }
+  assert.equal(bareShown.session_id, 'bare-session')
+  assert.equal(bareShown.cwd, bare)
+})
+
+test('Qoder and WorkBuddy rendered transcripts redact credentials', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-secrets-'))
+  const previousConfig = process.env.QODER_CONFIG_DIR
+  const previousIde = process.env.QODER_IDE_CACHE_DIR
+  const previousWorkbuddy = process.env.WORKBUDDY_CONFIG_DIR
+  t.after(async () => {
+    if (previousConfig === undefined) delete process.env.QODER_CONFIG_DIR
+    else process.env.QODER_CONFIG_DIR = previousConfig
+    if (previousIde === undefined) delete process.env.QODER_IDE_CACHE_DIR
+    else process.env.QODER_IDE_CACHE_DIR = previousIde
+    if (previousWorkbuddy === undefined) delete process.env.WORKBUDDY_CONFIG_DIR
+    else process.env.WORKBUDDY_CONFIG_DIR = previousWorkbuddy
+    await rm(root, { recursive: true, force: true })
+  })
+  const cwd = join(root, 'workspace')
+  const qoderHome = join(root, 'qoder')
+  const workbuddyHome = join(root, 'workbuddy')
+  process.env.QODER_CONFIG_DIR = qoderHome
+  process.env.QODER_IDE_CACHE_DIR = join(root, 'no-ide')
+  process.env.WORKBUDDY_CONFIG_DIR = workbuddyHome
+  const qoderPath = join(qoderHome, 'projects', qoderDirectorySlug(cwd), 'session.jsonl')
+  const workbuddyPath = join(workbuddyHome, 'projects', workbuddyDirectorySlug(cwd), 'session.jsonl')
+  await mkdir(join(qoderPath, '..'), { recursive: true })
+  await mkdir(join(workbuddyPath, '..'), { recursive: true })
+  await writeFile(qoderPath, jsonl([
+    {
+      type: 'user',
+      uuid: 'u',
+      parentUuid: null,
+      sessionId: 'secret-session',
+      cwd,
+      timestamp: '2026-11-03T00:00:00Z',
+      message: { role: 'user', content: 'Continue the safe task.' },
+    },
+    {
+      type: 'assistant',
+      uuid: 'a',
+      parentUuid: 'u',
+      sessionId: 'secret-session',
+      cwd,
+      timestamp: '2026-11-03T00:01:00Z',
+      message: {
+        role: 'assistant',
+        content: [{
+          type: 'tool_use',
+          id: 'call',
+          name: 'http_request',
+          input: { Authorization: `Bearer ${SYNTHETIC_CREDENTIAL}` },
+        }],
+      },
+    },
+    {
+      type: 'user',
+      uuid: 'r',
+      parentUuid: 'a',
+      sessionId: 'secret-session',
+      cwd,
+      timestamp: '2026-11-03T00:02:00Z',
+      message: {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'call',
+          content: `OPENAI_API_KEY=${SYNTHETIC_CREDENTIAL}`,
+        }],
+      },
+    },
+  ]))
+  await writeFile(workbuddyPath, jsonl([
+    {
+      type: 'message',
+      id: 'u',
+      role: 'user',
+      sessionId: 'secret-session',
+      cwd,
+      timestamp: 1793664000000,
+      content: [{ type: 'input_text', text: 'Continue the safe task.' }],
+    },
+    {
+      type: 'function_call',
+      callId: 'call',
+      name: 'http_request',
+      sessionId: 'secret-session',
+      cwd,
+      timestamp: 1793664000000,
+      arguments: JSON.stringify({ Authorization: `Bearer ${SYNTHETIC_CREDENTIAL}` }),
+    },
+    {
+      type: 'function_call_result',
+      callId: 'call',
+      sessionId: 'secret-session',
+      cwd,
+      timestamp: 1793664000000,
+      output: `OPENAI_API_KEY=${SYNTHETIC_CREDENTIAL}`,
+    },
+  ]))
+
+  for (const provider of ['qoder', 'workbuddy'] as const) {
+    const raw = await runSessionReader({ provider, action: 'show', cwd })
+    assert.equal(raw.includes(SYNTHETIC_CREDENTIAL), false, provider)
+    const shown = JSON.parse(raw) as {
+      turns: Array<{
+        tool_calls?: Array<{ name: string, input: string, inert: boolean }>
+        tool_results?: Array<{ content: string, inert: boolean }>
+      }>
+    }
+    const calls = shown.turns.flatMap(turn => turn.tool_calls ?? [])
+    const results = shown.turns.flatMap(turn => turn.tool_results ?? [])
+    assert.equal(calls.some(call => call.name === 'http_request' && call.inert && call.input.includes('[REDACTED]')), true, provider)
+    assert.equal(results.some(result => result.inert && result.content.includes('OPENAI_API_KEY=[REDACTED]')), true, provider)
+    assert.equal(JSON.stringify(calls).includes(SYNTHETIC_CREDENTIAL), false, provider)
+    assert.equal(JSON.stringify(results).includes(SYNTHETIC_CREDENTIAL), false, provider)
+  }
+})
+
+test('Qoder and WorkBuddy skip records whose type is not a string', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-corrupt-'))
+  const previousConfig = process.env.QODER_CONFIG_DIR
+  const previousIde = process.env.QODER_IDE_CACHE_DIR
+  const previousWorkbuddy = process.env.WORKBUDDY_CONFIG_DIR
+  t.after(async () => {
+    if (previousConfig === undefined) delete process.env.QODER_CONFIG_DIR
+    else process.env.QODER_CONFIG_DIR = previousConfig
+    if (previousIde === undefined) delete process.env.QODER_IDE_CACHE_DIR
+    else process.env.QODER_IDE_CACHE_DIR = previousIde
+    if (previousWorkbuddy === undefined) delete process.env.WORKBUDDY_CONFIG_DIR
+    else process.env.WORKBUDDY_CONFIG_DIR = previousWorkbuddy
+    await rm(root, { recursive: true, force: true })
+  })
+  const cwd = join(root, 'workspace')
+  const qoderHome = join(root, 'qoder')
+  const workbuddyHome = join(root, 'workbuddy')
+  process.env.QODER_CONFIG_DIR = qoderHome
+  process.env.QODER_IDE_CACHE_DIR = join(root, 'no-ide')
+  process.env.WORKBUDDY_CONFIG_DIR = workbuddyHome
+  const qoderPath = join(qoderHome, 'projects', qoderDirectorySlug(cwd), 'session.jsonl')
+  const workbuddyPath = join(workbuddyHome, 'projects', workbuddyDirectorySlug(cwd), 'session.jsonl')
+  await mkdir(join(qoderPath, '..'), { recursive: true })
+  await mkdir(join(workbuddyPath, '..'), { recursive: true })
+  await writeFile(qoderPath, jsonl([
+    {
+      type: 'user',
+      uuid: 'u',
+      parentUuid: null,
+      sessionId: 'kept-session',
+      cwd,
+      timestamp: '2026-11-03T00:00:00Z',
+      message: { role: 'user', content: 'Keep this turn.' },
+    },
+    { type: { unexpected: 'object' } },
+  ]))
+  await writeFile(workbuddyPath, jsonl([
+    {
+      type: 'message',
+      id: 'u',
+      role: 'user',
+      sessionId: 'kept-session',
+      cwd,
+      timestamp: 1793664000000,
+      content: [{ type: 'input_text', text: 'Keep this turn.' }],
+    },
+    { type: { unexpected: 'object' } },
+  ]))
+
+  for (const provider of ['qoder', 'workbuddy'] as const) {
+    const raw = await runSessionReader({ provider, action: 'show', cwd })
+    assert.equal(raw.includes('Traceback'), false, provider)
+    assert.equal(raw.startsWith('FOREIGN_SESSION_READER_FAILED'), false, provider)
+    const shown = JSON.parse(raw) as {
+      turns: Array<{ text: string }>
+      warnings: Array<{ code: string }>
+    }
+    assert.equal(shown.turns.some(turn => turn.text.includes('Keep this turn.')), true, provider)
+    assert.equal(shown.warnings.some(warning => warning.code === 'corrupt_records_skipped'), true, provider)
+  }
+})

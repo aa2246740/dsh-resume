@@ -46,6 +46,49 @@ def _same_cwd(left: Any, right: str) -> bool:
     )
 
 
+# Output boundary for rendered transcripts. Foreign tool arguments and results
+# are copied verbatim by the provider parsers; this pass runs after that copy.
+_BEARER_SECRET_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
+_SK_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
+_ASSIGNMENT_SECRET_RE = re.compile(
+    r"(?i)(\b[A-Za-z0-9_]*(?:API_KEY|SECRET|TOKEN)\b\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|\S+)"
+)
+_AUTHORIZATION_SECRET_RE = re.compile(
+    r"(?i)(\bAuthorization\b\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|\S+)"
+)
+
+
+def _redact_text(value: str) -> str:
+    value = _ASSIGNMENT_SECRET_RE.sub(r"\1[REDACTED]", value)
+    value = _AUTHORIZATION_SECRET_RE.sub(r"\1[REDACTED]", value)
+    value = _BEARER_SECRET_RE.sub("Bearer [REDACTED]", value)
+    return _SK_SECRET_RE.sub("[REDACTED]", value)
+
+
+def _redact_output(value: Any) -> Any:
+    if isinstance(value, str):
+        return _redact_text(value)
+    if isinstance(value, list):
+        return [_redact_output(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_output(item) for key, item in value.items()}
+    return value
+
+
+def _split_typed_records(
+    records: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """Drop records whose type cannot be used in set membership checks."""
+    kept: list[dict[str, Any]] = []
+    corrupt = 0
+    for record in records:
+        if isinstance(record.get("type"), str):
+            kept.append(record)
+        else:
+            corrupt += 1
+    return kept, corrupt
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8", errors="replace"))
@@ -1758,8 +1801,10 @@ _QODER_MESSAGE_TYPES = {"user", "assistant", "system"}
 
 
 def _qoder_message_eligible(record: dict[str, Any]) -> bool:
+    record_type = record.get("type")
     return (
-        record.get("type") in _QODER_MESSAGE_TYPES
+        isinstance(record_type, str)
+        and record_type in _QODER_MESSAGE_TYPES
         and not record.get("isSidechain")
         and isinstance(record.get("uuid"), str)
         and bool(record.get("uuid"))
@@ -1928,8 +1973,11 @@ class QoderAdapter(ProviderAdapter):
             value = record.get("gitBranch")
             if isinstance(value, str) and value.strip():
                 branch = value
-            if record.get("type") in {"user", "assistant"} and isinstance(
-                record.get("message"), dict
+            record_type = record.get("type")
+            if (
+                isinstance(record_type, str)
+                and record_type in {"user", "assistant"}
+                and isinstance(record.get("message"), dict)
             ):
                 has_turns = True
             stamp = core._timestamp_to_millis(record.get("timestamp"))
@@ -1939,10 +1987,17 @@ class QoderAdapter(ProviderAdapter):
             actual_cwd = _qoder_workspace_dir(records)
         if not has_turns:
             return None
-        if require_cwd and not _same_cwd(actual_cwd, cwd) and not slug_matches:
-            return None
-        if actual_cwd is None and slug_matches:
-            actual_cwd = cwd
+        # A directory slug is only a fallback for transcripts that never
+        # recorded a cwd. project-a and project_a share a slug, so an explicit
+        # cwd must match the requested workspace on its own.
+        recorded_cwd = actual_cwd.strip() if isinstance(actual_cwd, str) else ""
+        if require_cwd:
+            if not recorded_cwd:
+                if not slug_matches:
+                    return None
+                actual_cwd = cwd
+            elif not _same_cwd(recorded_cwd, cwd):
+                return None
         if session_id is None:
             session_id = path.stem
         title = core._claude_title(records, [])
@@ -2036,6 +2091,13 @@ class QoderAdapter(ProviderAdapter):
         path = Path(str(candidate["path"])).expanduser()
         records, malformed = core._read_plain_jsonl(path)
         warnings: list[dict[str, str]] = []
+        records, corrupt = _split_typed_records(records)
+        if corrupt:
+            core._add_warning(
+                warnings,
+                "corrupt_records_skipped",
+                f"Skipped {corrupt} Qoder record(s) whose type was not a string.",
+            )
         if malformed:
             core._add_warning(
                 warnings,
@@ -2149,7 +2211,7 @@ class QoderAdapter(ProviderAdapter):
             "turns": turns,
             "warnings": warnings,
         }
-        return core._finalize_result(result)
+        return _redact_output(core._finalize_result(result))
 
 
 _WORKBUDDY_CUSTOM_ITEM_TYPES = {
@@ -2605,8 +2667,12 @@ class WorkBuddyAdapter(ProviderAdapter):
         filtered_records = 0
         unknown_records = 0
 
+        corrupt_records = 0
         for index, record in enumerate(records):
             record_type = record.get("type")
+            if not isinstance(record_type, str):
+                corrupt_records += 1
+                continue
             if record_type in _WORKBUDDY_CUSTOM_ITEM_TYPES:
                 if record_type == "summary":
                     content = (
@@ -2685,6 +2751,12 @@ class WorkBuddyAdapter(ProviderAdapter):
             else:
                 unknown_records += 1
 
+        if corrupt_records:
+            core._add_warning(
+                warnings,
+                "corrupt_records_skipped",
+                f"Skipped {corrupt_records} WorkBuddy record(s) whose type was not a string.",
+            )
         if malformed:
             core._add_warning(
                 warnings,
@@ -2732,14 +2804,14 @@ class WorkBuddyAdapter(ProviderAdapter):
             "summaries": summaries,
             "warnings": warnings,
         }
-        return core._finalize_result(result)
+        return _redact_output(core._finalize_result(result))
 
 
 def _workbuddy_assistant_text(content: Any) -> str:
     parts: list[str] = []
     for block in core._blocks(content):
         block_type = block.get("type")
-        if block_type in {"output_text", "text"}:
+        if isinstance(block_type, str) and block_type in {"output_text", "text"}:
             text = block.get("text")
             if isinstance(text, str) and text:
                 parts.append(text)
