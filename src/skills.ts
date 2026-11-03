@@ -53,6 +53,13 @@ export const RESUME_SKILL_SPECS = [
     recoveryBoundary: 'The reader uses Qoder transcript JSONL under projects/ in QODER_CONFIG_DIR (or ~/.qoder, QODER_HOME alias) plus the IDE SharedClientCache/cli/projects root. It never reads encrypted state.json siblings, logs/sessions run logs, .auth credentials, or settings.json, and skips isSidechain subagent records and hidden reasoning.',
   },
   {
+    name: 'resume-workbuddy',
+    provider: 'workbuddy',
+    product: 'WorkBuddy',
+    description: '继续当前工作目录中的 WorkBuddy 会话；可附会话 ID、JSONL 路径或标题关键词。',
+    recoveryBoundary: 'The reader scans WorkBuddy/CodeBuddy projects JSONL (projects/<slug>/<sessionId>.jsonl) under the resolved config root and never replays calls or revives the app. Hidden reasoning, meta/compact/steer/teammate records, and quick-ask scratch sessions are excluded; the workbuddy.db index is not read.',
+  },
+  {
     name: 'resume-zcode',
     provider: 'zcode',
     product: 'ZCode',
