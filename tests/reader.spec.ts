@@ -1284,6 +1284,162 @@ test('Qoder and WorkBuddy rendered transcripts redact credentials', async (t) =>
   }
 })
 
+test('opaque credential patterns redact values that do not start with sk-', () => {
+  const result = spawnSync('python3', ['-B', 'tests/redaction_patterns.py'], {
+    cwd: join(dirname(fileURLToPath(import.meta.url)), '..'),
+    encoding: 'utf8',
+  })
+  assert.equal(result.status, 0, result.stderr || result.stdout)
+})
+
+test('Qoder and WorkBuddy redact opaque Bearer, Basic, and JSON keys', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-resume-opaque-'))
+  const previousConfig = process.env.QODER_CONFIG_DIR
+  const previousIde = process.env.QODER_IDE_CACHE_DIR
+  const previousWorkbuddy = process.env.WORKBUDDY_CONFIG_DIR
+  t.after(async () => {
+    if (previousConfig === undefined) delete process.env.QODER_CONFIG_DIR
+    else process.env.QODER_CONFIG_DIR = previousConfig
+    if (previousIde === undefined) delete process.env.QODER_IDE_CACHE_DIR
+    else process.env.QODER_IDE_CACHE_DIR = previousIde
+    if (previousWorkbuddy === undefined) delete process.env.WORKBUDDY_CONFIG_DIR
+    else process.env.WORKBUDDY_CONFIG_DIR = previousWorkbuddy
+    await rm(root, { recursive: true, force: true })
+  })
+  const bearer = 'VALIDATOR_OPAQUE_CREDENTIAL_authorization_bearer_text_0123456789'
+  const basic = 'VALIDATOR_OPAQUE_CREDENTIAL_authorization_basic_text_0123456789'
+  const apiJson = 'VALIDATOR_OPAQUE_CREDENTIAL_api_key_json_0123456789'
+  const apiKey = 'OPAQUE_APIKEY_VALUE_0123456789'
+  const tokens = [bearer, basic, apiJson, apiKey]
+  const header = `Authorization: Bearer ${bearer}`
+  const basicHeader = `Authorization: Basic ${basic}`
+  const jsonText = JSON.stringify({
+    OPENAI_API_KEY: apiJson,
+    apiKey,
+    api_key: 'OPAQUE_API_KEY_VALUE_0123456789',
+    access_token: 'OPAQUE_ACCESS_TOKEN_VALUE_0123456789',
+    secret: 'OPAQUE_SECRET_VALUE_0123456789',
+    authorization: `Bearer OPAQUE_AUTHZ_VALUE_0123456789`,
+    client_secret: 'OPAQUE_CLIENT_SECRET_VALUE_0123456789',
+    password: 'OPAQUE_PASSWORD_VALUE_0123456789',
+  })
+  tokens.push(
+    'OPAQUE_API_KEY_VALUE_0123456789',
+    'OPAQUE_ACCESS_TOKEN_VALUE_0123456789',
+    'OPAQUE_SECRET_VALUE_0123456789',
+    'OPAQUE_AUTHZ_VALUE_0123456789',
+    'OPAQUE_CLIENT_SECRET_VALUE_0123456789',
+    'OPAQUE_PASSWORD_VALUE_0123456789',
+  )
+  const cwd = join(root, 'workspace')
+  const qoderHome = join(root, 'qoder')
+  const workbuddyHome = join(root, 'workbuddy')
+  process.env.QODER_CONFIG_DIR = qoderHome
+  process.env.QODER_IDE_CACHE_DIR = join(root, 'no-ide')
+  process.env.WORKBUDDY_CONFIG_DIR = workbuddyHome
+  const qoderPath = join(qoderHome, 'projects', qoderDirectorySlug(cwd), 'session.jsonl')
+  const workbuddyPath = join(workbuddyHome, 'projects', workbuddyDirectorySlug(cwd), 'session.jsonl')
+  await mkdir(join(qoderPath, '..'), { recursive: true })
+  await mkdir(join(workbuddyPath, '..'), { recursive: true })
+  const qoderInput = { command: header, apiKey, authorization: `Bearer ${bearer}` }
+  await writeFile(qoderPath, jsonl([
+    {
+      type: 'user',
+      uuid: 'u',
+      parentUuid: null,
+      sessionId: 'opaque-session',
+      cwd,
+      timestamp: '2026-11-03T00:00:00Z',
+      message: { role: 'user', content: 'Continue safely.' },
+    },
+    {
+      type: 'assistant',
+      uuid: 'a',
+      parentUuid: 'u',
+      sessionId: 'opaque-session',
+      cwd,
+      timestamp: '2026-11-03T00:01:00Z',
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: `${header}\n${basicHeader}\n${jsonText}` },
+          { type: 'tool_use', id: 'call', name: 'request', input: qoderInput },
+        ],
+      },
+    },
+    {
+      type: 'user',
+      uuid: 'r',
+      parentUuid: 'a',
+      sessionId: 'opaque-session',
+      cwd,
+      timestamp: '2026-11-03T00:02:00Z',
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: 'call', content: `${basicHeader}\n${jsonText}` }],
+      },
+    },
+  ]))
+  await writeFile(workbuddyPath, jsonl([
+    {
+      type: 'message',
+      id: 'u',
+      role: 'user',
+      sessionId: 'opaque-session',
+      cwd,
+      timestamp: 1793664000000,
+      content: [{ type: 'input_text', text: 'Continue safely.' }],
+    },
+    {
+      type: 'message',
+      id: 'a',
+      role: 'assistant',
+      sessionId: 'opaque-session',
+      cwd,
+      timestamp: 1793664000000,
+      content: [{ type: 'output_text', text: `${header}\n${basicHeader}\n${jsonText}` }],
+    },
+    {
+      type: 'function_call',
+      callId: 'call',
+      name: 'request',
+      sessionId: 'opaque-session',
+      cwd,
+      timestamp: 1793664000000,
+      arguments: JSON.stringify({ command: header, apiKey, authorization: `Bearer ${bearer}` }),
+    },
+    {
+      type: 'function_call_result',
+      callId: 'call',
+      sessionId: 'opaque-session',
+      cwd,
+      timestamp: 1793664000000,
+      output: `${basicHeader}\n${jsonText}`,
+    },
+  ]))
+
+  for (const provider of ['qoder', 'workbuddy'] as const) {
+    const raw = await runSessionReader({
+      provider,
+      action: 'show',
+      cwd,
+      maxToolChars: 4000,
+    })
+    for (const token of tokens) {
+      assert.equal(raw.includes(token), false, `${provider} ${token}`)
+    }
+    assert.equal(raw.includes(`Bearer ${bearer}`), false, provider)
+    assert.equal(raw.includes(`Basic ${basic}`), false, provider)
+    assert.match(raw, /\[REDACTED\]/)
+    const shown = JSON.parse(raw) as {
+      turns: Array<{ text?: string, tool_calls?: Array<{ input: string }>, tool_results?: Array<{ content: string }> }>
+    }
+    const blob = JSON.stringify(shown.turns)
+    assert.equal(blob.includes('[REDACTED] ' + bearer), false, provider)
+    assert.equal(blob.includes('[REDACTED] ' + basic), false, provider)
+  }
+})
+
 test('Qoder and WorkBuddy skip records whose type is not a string', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-resume-corrupt-'))
   const previousConfig = process.env.QODER_CONFIG_DIR

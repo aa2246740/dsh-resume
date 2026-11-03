@@ -48,30 +48,121 @@ def _same_cwd(left: Any, right: str) -> bool:
 
 # Output boundary for rendered transcripts. Foreign tool arguments and results
 # are copied verbatim by the provider parsers; this pass runs after that copy.
-_BEARER_SECRET_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
-_SK_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
+# An Authorization value includes its scheme. Replacing only the word Bearer or
+# Basic leaves the opaque credential behind, and a quoted JSON key is not a bare
+# assignment. Dict keys are removed before nested values are copied out.
+_MAX_JSON_REDACTION_DEPTH = 8
+_SENSITIVE_LAST_PIECES = {"apikey", "authorization", "password", "secret", "token"}
+_SENSITIVE_ANY_PIECES = {"authorization", "password", "secret"}
+_COMPACT_KEY_SUFFIXES = (
+    "accesstoken",
+    "apikey",
+    "clientsecret",
+    "idtoken",
+    "refreshtoken",
+)
+
+
+def _key_pieces(key: str) -> list[str]:
+    broken = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+    broken = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", broken)
+    return [piece.lower() for piece in re.findall(r"[A-Za-z0-9]+", broken)]
+
+
+def _is_sensitive_key(key: str) -> bool:
+    pieces = _key_pieces(key)
+    if not pieces:
+        return False
+    if pieces[-1] in _SENSITIVE_LAST_PIECES or pieces[-1].endswith("apikey"):
+        return True
+    if len(pieces) >= 2 and pieces[-2:] == ["api", "key"]:
+        return True
+    if any(piece in _SENSITIVE_ANY_PIECES for piece in pieces):
+        return True
+    compact = "".join(pieces)
+    return any(
+        compact == suffix or compact.endswith(suffix) for suffix in _COMPACT_KEY_SUFFIXES
+    )
+
+
+_QUOTE = r"""(?:\\?["'])"""
+_KEY_BODY = (
+    r"[A-Za-z0-9_.-]*?"
+    r"(?:access[_-]?token|refresh[_-]?token|id[_-]?token|client[_-]?secret|"
+    r"api[_-]?key|authorization|password|secret|token)"
+)
+# Bearer/Basic must be consumed with the following token. A bare \S+ stops at
+# the scheme word and the credential survives the later scheme pass.
+_SECRET_VALUE = (
+    r"(?:(?:Bearer|Basic)\s+\S+"
+    r"|\\?\"(?:Bearer|Basic)\s+(?:\\.|[^\"\\])*\\?\""
+    r"|\\?'(?:Bearer|Basic)\s+(?:\\.|[^'\\])*\\?'"
+    r"|\\?\"(?:\\.|[^\"\\])*\\?\""
+    r"|\\?'(?:\\.|[^'\\])*\\?'"
+    r"|\S+)"
+)
 _ASSIGNMENT_SECRET_RE = re.compile(
-    r"(?i)(\b[A-Za-z0-9_]*(?:API_KEY|SECRET|TOKEN)\b\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|\S+)"
+    rf"(?i)((?<![A-Za-z0-9_]){_QUOTE}?({_KEY_BODY})(?![A-Za-z0-9_]){_QUOTE}?\s*[=:]\s*){_SECRET_VALUE}"
 )
-_AUTHORIZATION_SECRET_RE = re.compile(
-    r"(?i)(\bAuthorization\b\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|\S+)"
-)
+_SCHEME_SECRET_RE = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}")
+_SK_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
 
 
-def _redact_text(value: str) -> str:
-    value = _ASSIGNMENT_SECRET_RE.sub(r"\1[REDACTED]", value)
-    value = _AUTHORIZATION_SECRET_RE.sub(r"\1[REDACTED]", value)
-    value = _BEARER_SECRET_RE.sub("Bearer [REDACTED]", value)
+def _assignment_redaction(match: re.Match[str]) -> str:
+    if not _is_sensitive_key(match.group(2)):
+        return match.group(0)
+    return match.group(1) + "[REDACTED]"
+
+
+def _apply_secret_patterns(value: str) -> str:
+    value = _ASSIGNMENT_SECRET_RE.sub(_assignment_redaction, value)
+    value = _SCHEME_SECRET_RE.sub(r"\1 [REDACTED]", value)
     return _SK_SECRET_RE.sub("[REDACTED]", value)
 
 
-def _redact_output(value: Any) -> Any:
+def _parse_json_container(value: str) -> Any | None:
+    stripped = value.strip()
+    if len(stripped) < 2 or stripped[0] not in "{[":
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, (dict, list)):
+        return parsed
+    return None
+
+
+def _redact_string(value: str, depth: int) -> str:
+    if depth < _MAX_JSON_REDACTION_DEPTH:
+        parsed = _parse_json_container(value)
+        if parsed is not None:
+            redacted = _redact_output(parsed, depth + 1)
+            if redacted != parsed:
+                try:
+                    return json.dumps(redacted, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    pass
+    return _apply_secret_patterns(value)
+
+
+def _redact_text(value: str) -> str:
+    return _redact_string(value, 0)
+
+
+def _redact_output(value: Any, depth: int = 0) -> Any:
     if isinstance(value, str):
-        return _redact_text(value)
+        return _redact_string(value, depth)
     if isinstance(value, list):
-        return [_redact_output(item) for item in value]
+        return [_redact_output(item, depth) for item in value]
     if isinstance(value, dict):
-        return {key: _redact_output(item) for key, item in value.items()}
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            if isinstance(key, str) and _is_sensitive_key(key):
+                redacted[key] = "[REDACTED]"
+            else:
+                redacted[key] = _redact_output(item, depth)
+        return redacted
     return value
 
 
