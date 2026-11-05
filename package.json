@@ -1,6 +1,6 @@
 {
   "name": "dsh-resume",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Continue Codex, Claude Code, Cursor, Grok, Pi, Qoder, WorkBuddy, and ZCode work in DeepSeek Harness.",
   "type": "module",
   "main": "lib/dsh-resume.js",
@@ -26,6 +26,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && tsdown",
+    "pack:scoped": "node scripts/pack-scoped.mjs",
     "check": "pnpm typecheck && pnpm test && pnpm build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx/esm --test tests/*.spec.ts"
