@@ -6,31 +6,33 @@
 
 ## 安装
 
-**0.2.7 面向 DeepSeek Harness 0.2.1-rc.5 验证。** 安装包和仓库均包含编译好的插件，无需下载 Harness 源码或自行构建。读取历史需要本机有 Python 3；读取压缩的 Codex rollout 另需 `zstd`。
+**0.2.8 面向 DeepSeek Harness 0.2.1-rc.5。** 安装包和仓库均包含编译好的插件，无需下载 Harness 源码或自行构建。读取历史需要本机有 Python 3；读取压缩的 Codex rollout 另需 `zstd`。
 
 ### 官方桌面端
 
 1. 打开 **插件 → 添加插件**（部分版本入口在设置里）。
-2. 在 **包名或地址** 中填入 `github:aa2246740/dsh-resume#v0.2.7`，然后安装并启用。
+2. 在 **包名或地址** 中填入 `github:aa2246740/dsh-resume#v0.2.8`，然后安装并启用。
 3. 按安装器提示完成激活，在输入框输入 `/resume-`，确认能看到下面列出的八条命令。
 
-也可以在 [v0.2.7 Release](https://github.com/aa2246740/dsh-resume/releases/tag/v0.2.7) 下载 `dsh-resume-0.2.7.tgz`，把该文件的绝对路径填入同一安装框。桌面端使用自己的 desktop profile，无需运行 Web Host 命令。
+也可以在 [v0.2.8 Release](https://github.com/aa2246740/dsh-resume/releases/tag/v0.2.8) 下载 `dsh-resume-0.2.8.tgz`，把该文件的绝对路径填入同一安装框。桌面端使用自己的 desktop profile，无需运行 Web Host 命令。
 
 ### Web Host
 
 使用官方 CLI：
 
 ```sh
-dsh plugin --profile web add github:aa2246740/dsh-resume#v0.2.7
+dsh plugin --profile web add github:aa2246740/dsh-resume#v0.2.8
 ```
 
 或在下载的安装包所在目录运行：
 
 ```sh
-dsh plugin --profile web add ./dsh-resume-0.2.7.tgz
+dsh plugin --profile web add ./dsh-resume-0.2.8.tgz
 ```
 
 需要官方 `dsh` 和 pnpm 可用，Node.js 版本为 `^22.19.0` 或 `>=24.0.0`。使用与现有 Web Host 相同的 `DSH_HOME`；这条命令只安装到 Web profile，不会替桌面端安装。按官方安装器返回的提示完成激活；只有它要求重启时，再正常退出并重开原来的 Host，不要启动第二个 Host。
+
+也可以从 npm 安装 `@aa2246740/dsh-resume`。npm 包与 GitHub 包提供同一个插件，选择其中一种安装，不要同时安装两份。
 
 ### 升级与卸载
 
@@ -41,6 +43,8 @@ dsh plugin --profile web add ./dsh-resume-0.2.7.tgz
 ```sh
 dsh plugin --profile web remove dsh-resume
 ```
+
+如果安装的是 npm 包，把上面的包名换成 `@aa2246740/dsh-resume`。
 
 ## 使用
 
